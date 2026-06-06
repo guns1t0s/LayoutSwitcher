@@ -1,0 +1,169 @@
+import Foundation
+
+/// Why a given token was / was not converted. Surfaced in shadow-mode review.
+public enum DetectionReason: String, Sendable {
+    case typedIsValidWord        // already a real word as-typed — leave it
+    case altIsWord               // converted form is a real word, typed form is not
+    case ngramMargin             // neither is a dictionary word; n-gram favoured the swap
+    case ambiguousBothValid      // valid in both layouts — when in doubt, don't touch
+    case belowThreshold          // some signal, but under the confidence threshold
+    case tooShort
+    case noLetters
+    case excepted                // in user exceptions / learned reverts
+    case whitelistedLatin        // forced to latin by whitelist
+    case suppressed              // hold-to-suppress / global toggle off
+}
+
+public struct Decision: Sendable, Equatable {
+    public let shouldConvert: Bool
+    public let from: Layout
+    public let to: Layout
+    public let original: String
+    public let converted: String
+    public let confidence: Double          // 0…1
+    public let reason: DetectionReason
+
+    public static func noop(_ token: String, layout: Layout, reason: DetectionReason) -> Decision {
+        Decision(shouldConvert: false, from: layout, to: layout,
+                 original: token, converted: token, confidence: 0, reason: reason)
+    }
+}
+
+/// Pure, deterministic detector (FR-7…FR-10). Decides whether a finished word
+/// was typed in the wrong layout, *erring hard toward no-op* — a false
+/// conversion corrupts already-correct text and is the one thing acceptance
+/// criteria forbid (≤0.5% false positives), whereas a miss is tolerable.
+public final class DetectionEngine: @unchecked Sendable {
+    private let dicts: Dictionaries
+
+    public struct Config: Sendable {
+        public var threshold: Double          // 0…1 confidence gate for the n-gram path
+        public var minWordLength: Int         // letters required for the n-gram path
+        public var ngramSteepness: Double     // sigmoid slope over the log-prob margin
+        public var convertAmbiguous: Bool     // convert when valid in BOTH layouts (off)
+        public init(threshold: Double = 0.7,
+                    minWordLength: Int = 3,
+                    ngramSteepness: Double = 2.5,
+                    convertAmbiguous: Bool = false) {
+            self.threshold = threshold
+            self.minWordLength = minWordLength
+            self.ngramSteepness = ngramSteepness
+            self.convertAmbiguous = convertAmbiguous
+        }
+    }
+
+    public var config: Config
+
+    /// User-tunable lexicons (FR-16/17/18). Lowercased keys.
+    public var exceptions: Set<String> = []        // never convert
+    public var whitelistLatin: Set<String> = []    // always latin
+    public var learnedReverts: Set<String> = []    // manually reverted → stop converting
+
+    public init(dictionaries: Dictionaries, config: Config = Config()) {
+        self.dicts = dictionaries
+        self.config = config
+    }
+
+    /// - Parameters:
+    ///   - token: the finished word, exactly as typed.
+    ///   - typedLayout: layout known to be active while typing, if any.
+    ///   - context: layout of the surrounding text, if known (FR-9).
+    public func evaluate(_ token: String,
+                         typedLayout: Layout? = nil,
+                         context: Layout? = nil) -> Decision {
+
+        let core = token.trimmingCharacters(in: punctuation)
+        let lc = core.lowercased()
+
+        // Layout the token currently reads as.
+        guard let current = typedLayout ?? core.dominantLayout else {
+            return .noop(token, layout: .en, reason: .noLetters)
+        }
+        let target = current.other
+        let altForm = KeyMap.convert(core, to: target)
+        let altLC = altForm.lowercased()
+
+        // --- Hard lexicon gates -------------------------------------------------
+        // Never touch user exceptions or words the user reverted by hand.
+        if exceptions.contains(lc) || exceptions.contains(altLC)
+            || learnedReverts.contains(lc) || learnedReverts.contains(altLC) {
+            return .noop(token, layout: current, reason: .excepted)
+        }
+        // "Always latin" terms: if the latin reading is whitelisted and we are
+        // currently cyrillic, swap to latin; if already latin, leave it.
+        if current == .ru, whitelistLatin.contains(altLC) {
+            return Decision(shouldConvert: true, from: .ru, to: .en,
+                            original: token, converted: applyShape(of: core, to: altForm),
+                            confidence: 1.0, reason: .whitelistedLatin)
+        }
+        if current == .en, whitelistLatin.contains(lc) {
+            return .noop(token, layout: current, reason: .typedIsValidWord)
+        }
+
+        // --- Length gate --------------------------------------------------------
+        if core.letterCount < 1 {
+            return .noop(token, layout: current, reason: .noLetters)
+        }
+
+        let curModel = dicts.model(for: current)
+        let altModel = dicts.model(for: target)
+        let curIsWord = curModel.contains(lc)
+        let altIsWord = altModel.contains(altLC)
+
+        // --- Dictionary decisions (high confidence) -----------------------------
+        if curIsWord && !altIsWord {
+            return .noop(token, layout: current, reason: .typedIsValidWord)
+        }
+        if altIsWord && !curIsWord {
+            return Decision(shouldConvert: true, from: current, to: target,
+                            original: token, converted: applyShape(of: core, to: altForm),
+                            confidence: 1.0, reason: .altIsWord)
+        }
+        if curIsWord && altIsWord {
+            // Valid both ways (e.g. "ctj" vs "сей"): default to leaving it.
+            if config.convertAmbiguous, let ctx = context, ctx == target {
+                return Decision(shouldConvert: true, from: current, to: target,
+                                original: token, converted: applyShape(of: core, to: altForm),
+                                confidence: 0.6, reason: .ngramMargin)
+            }
+            return .noop(token, layout: current, reason: .ambiguousBothValid)
+        }
+
+        // --- Out-of-vocabulary: character n-gram margin -------------------------
+        if core.letterCount < config.minWordLength {
+            return .noop(token, layout: current, reason: .tooShort)
+        }
+        var margin = altModel.score(altLC) - curModel.score(lc)
+        // Context nudges the margin but cannot, alone, cross the threshold.
+        if let ctx = context {
+            margin += (ctx == target) ? 0.15 : (ctx == current ? -0.15 : 0)
+        }
+        let confidence = sigmoid(config.ngramSteepness * margin)
+        if margin > 0 && confidence >= config.threshold {
+            return Decision(shouldConvert: true, from: current, to: target,
+                            original: token, converted: applyShape(of: core, to: altForm),
+                            confidence: confidence, reason: .ngramMargin)
+        }
+        return .noop(token, layout: current, reason: .belowThreshold)
+    }
+
+    // MARK: - helpers
+
+    private let punctuation = CharacterSet.punctuationCharacters
+        .union(.whitespacesAndNewlines).union(.symbols)
+
+    /// Preserve the original capitalisation shape on the converted word
+    /// (ALL CAPS, Title, lower) so "Привет"→"Privet" not "privet".
+    private func applyShape(of original: String, to converted: String) -> String {
+        if original.count > 1, original == original.uppercased(),
+           original != original.lowercased() {
+            return converted.uppercased()
+        }
+        if let f = original.first, f.isUppercase {
+            return converted.prefix(1).uppercased() + converted.dropFirst()
+        }
+        return converted
+    }
+
+    private func sigmoid(_ x: Double) -> Double { 1.0 / (1.0 + exp(-x)) }
+}

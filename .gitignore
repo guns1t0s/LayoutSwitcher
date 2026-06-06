@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# SwiftPM build artifacts
+.build/
+app/.build/
+Package.resolved
+
+# Built app bundle
+dist/
+app/dist/
+
+# Xcode user state
+*.xcuserstate
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Signing material (never commit)
+*.p12
+*.pem
+*.cer
