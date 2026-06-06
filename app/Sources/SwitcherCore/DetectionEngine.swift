@@ -40,14 +40,17 @@ public final class DetectionEngine: @unchecked Sendable {
         public var threshold: Double          // 0…1 confidence gate for the n-gram path
         public var minWordLength: Int         // letters required for the n-gram path
         public var ngramSteepness: Double     // sigmoid slope over the log-prob margin
+        public var ngramMinMargin: Double     // REQUIRED log-prob gap before n-gram converts
         public var convertAmbiguous: Bool     // convert when valid in BOTH layouts (off)
-        public init(threshold: Double = 0.7,
-                    minWordLength: Int = 3,
+        public init(threshold: Double = 0.8,
+                    minWordLength: Int = 4,
                     ngramSteepness: Double = 2.5,
+                    ngramMinMargin: Double = 0.6,
                     convertAmbiguous: Bool = false) {
             self.threshold = threshold
             self.minWordLength = minWordLength
             self.ngramSteepness = ngramSteepness
+            self.ngramMinMargin = ngramMinMargin
             self.convertAmbiguous = convertAmbiguous
         }
     }
@@ -139,7 +142,10 @@ public final class DetectionEngine: @unchecked Sendable {
             margin += (ctx == target) ? 0.15 : (ctx == current ? -0.15 : 0)
         }
         let confidence = sigmoid(config.ngramSteepness * margin)
-        if margin > 0 && confidence >= config.threshold {
+        // Require a CLEAR gap (not just margin>0): the OOV n-gram signal is noisy
+        // on a small corpus, and a false conversion of correct text is the one
+        // thing we must avoid. Misses are fine — double-⇧ fixes them by hand.
+        if margin >= config.ngramMinMargin && confidence >= config.threshold {
             return Decision(shouldConvert: true, from: current, to: target,
                             original: token, converted: applyShape(of: core, to: altForm),
                             confidence: confidence, reason: .ngramMargin)

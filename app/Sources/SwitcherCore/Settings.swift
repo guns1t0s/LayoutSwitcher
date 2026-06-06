@@ -15,8 +15,8 @@ public struct Settings: Codable, Sendable, Equatable {
     public var startAtLogin: Bool = false
 
     // Switching policy
-    public var threshold: Double = 0.7               // FR-10 confidence gate
-    public var minWordLength: Int = 3
+    public var threshold: Double = 0.8               // FR-10 confidence gate
+    public var minWordLength: Int = 4
     public var convertAmbiguous: Bool = false
 
     // Indication (FR-1..FR-3)
@@ -29,7 +29,7 @@ public struct Settings: Codable, Sendable, Equatable {
     public var latinForUrlEmailSearch: Bool = true
 
     // Hotkeys (FR-13)
-    public var doubleShiftSwitchLayout: Bool = true  // double-tap ⇧ = switch layout
+    public var doubleShiftConvertWord: Bool = true   // double-tap ⇧ = convert last word + switch
     public var holdToSuppressModifier: UInt = 0      // e.g. Fn; 0 = off (FR-14)
 
     /// Customisable global hotkeys (FR-34 / scenario 9.3). Carbon keyCode + modifier

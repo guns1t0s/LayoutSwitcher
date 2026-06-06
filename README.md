@@ -64,7 +64,7 @@ Optional crash/login auto‑restart: `bash scripts/install_launchagent.sh` (Keep
 | Cycle case of selection | `⌃⌥C` |
 | Fix Caps of selection | `⌃⌥U` |
 | Convert current line | `⌃⌥L` |
-| Switch layout | double `⇧` |
+| Fix last word + switch layout | double `⇧` (same as `⌃⌥Z`) |
 
 ## How detection works
 

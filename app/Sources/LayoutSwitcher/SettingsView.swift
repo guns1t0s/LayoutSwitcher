@@ -148,7 +148,7 @@ struct SettingsView: View {
             Stepper("Мин. длина слова: \(model.settings.minWordLength)",
                     value: $model.settings.minWordLength, in: 2...8)
             Toggle("Конвертировать неоднозначные (валидно в обеих)", isOn: $model.settings.convertAmbiguous)
-            Toggle("Двойной ⇧ — переключить раскладку", isOn: $model.settings.doubleShiftSwitchLayout)
+            Toggle("Двойной ⇧ — конвертировать последнее слово", isOn: $model.settings.doubleShiftConvertWord)
             Toggle("Глушить автоконвертацию при удержании Fn", isOn: Binding(
                 get: { model.settings.holdToSuppressModifier != 0 },
                 set: { model.settings.holdToSuppressModifier = $0
