@@ -1,0 +1,367 @@
+import AppKit
+import CoreGraphics
+import SwitcherCore
+
+/// The policy layer (decomposition module 6). Wires keystrokes → buffer →
+/// DetectionEngine → LayoutController, and owns shadow-mode, the correction
+/// loop, undo, hold-to-suppress and layout memory. Runs entirely on main.
+final class ActionCoordinator: InputCaptureDelegate {
+
+    let store: Store
+    let engine: DetectionEngine
+    private let layout: LayoutController
+    private let context: ContextProvider
+    private let buffer = KeystrokeBuffer()
+
+    /// Recent applied/would-be conversions for the review panel (FR-21). Ring.
+    private(set) var shadowLog: [ShadowEntry] = []
+    private var shadowCounter = 0
+    private let shadowCap = 50
+
+    private struct LastWord { let text: String; let boundary: Character? }
+    private struct LastConversion { let original: String; let converted: String; let boundary: Character?; let layoutBefore: Layout }
+    private var lastCompleted: LastWord?
+    private var lastConversion: LastConversion?
+    private var lastContextLayout: Layout?
+
+    private var suppressActive = false
+    private var fullscreenActive = false
+    private var generation = 0
+
+    // Diagnostics (no typed text retained — just counts + last reason).
+    private(set) var boundariesSeen = 0
+    private(set) var conversionsApplied = 0
+    private(set) var lastReason = "—"
+    var isSuppressing: Bool { suppressActive }
+    var isFullscreen: Bool { fullscreenActive }
+
+    /// Called after any state change so the menu bar / overlay can refresh.
+    var onChange: (() -> Void)?
+    /// Called when a real layout switch was applied — drives toast/flash (FR-2/E5.5).
+    var onConversionApplied: ((Layout) -> Void)?
+
+    init(store: Store, dictionaries: Dictionaries, layout: LayoutController, context: ContextProvider) {
+        self.store = store
+        self.layout = layout
+        self.context = context
+        self.engine = DetectionEngine(dictionaries: dictionaries)
+        syncFromStore()
+    }
+
+    /// Pull tunables + lexicons out of the Store into the engine (call on change).
+    func syncFromStore() {
+        let s = store.settings
+        engine.config = .init(threshold: s.threshold,
+                              minWordLength: s.minWordLength,
+                              convertAmbiguous: s.convertAmbiguous)
+        engine.exceptions = store.data.exceptions
+        engine.whitelistLatin = store.data.whitelistLatin
+        engine.learnedReverts = store.revertedWords()
+    }
+
+    // MARK: - InputCaptureDelegate
+
+    func inputDidKeyDown(keycode: Int64, chars: String, flags: CGEventFlags) {
+        generation &+= 1
+        switch keycode {
+        case 51:                                   // Backspace
+            if !buffer.backspace() { resetWordState() }
+            return
+        case 117, 53, 71, 115, 116, 119, 121, 123, 124, 125, 126:  // fwd-del/esc/clear/nav
+            resetWordState(); return
+        case 36, 76:                               // Return / Enter
+            commitBoundary("\n"); return
+        case 48:                                   // Tab
+            commitBoundary("\t"); return
+        default:
+            break
+        }
+        for c in chars {
+            let step = buffer.input(c)
+            if let word = step.completedWord { onBoundary(word, step.boundary) }
+        }
+    }
+
+    func inputDidChangeFlags(_ flags: CGEventFlags) {
+        let mask = store.settings.holdToSuppressModifier
+        suppressActive = mask != 0 && (flags.rawValue & UInt64(mask)) == UInt64(mask)
+    }
+
+    func inputDidDoubleShift() {
+        if store.settings.doubleShiftSwitchLayout { toggleLayout() }   // 4.5: manual switch
+    }
+
+    func inputDidClick() { resetWordState() }
+
+    // MARK: - boundary pipeline (auto-convert)
+
+    private func commitBoundary(_ b: Character) {
+        let step = buffer.input(b)
+        if let word = step.completedWord { onBoundary(word, step.boundary) }
+    }
+
+    private func onBoundary(_ word: String, _ boundary: Character?) {
+        boundariesSeen += 1
+        lastCompleted = LastWord(text: word, boundary: boundary)
+
+        // FR-26: snippet/autoreplace expansion takes priority over conversion.
+        if store.settings.expandSnippets,
+           let expansion = Snippets.expand(word, using: store.data.snippets) {
+            applyReplacement(word, with: expansion, boundary: boundary, layoutAfter: nil)
+            return
+        }
+        // FR-25: fix accidental Caps Lock ("пРИВЕТ"→"Привет") and two leading
+        // capitals on the fly (opt-in). Caps-lock pattern is a strong signature
+        // (first letter lower, rest upper) → low false-positive.
+        if store.settings.autoFixCapitals {
+            let fixed = TextFixes.fixCapsLock(TextFixes.fixDoubleCapital(word))
+            if fixed != word {
+                applyReplacement(word, with: fixed, boundary: boundary, layoutAfter: nil)
+                return
+            }
+        }
+
+        guard store.settings.autoConvertEnabled, !suppressActive, !fullscreenActive else {
+            updateContext(with: word); return
+        }
+        if context.isSecureInput { updateContext(with: word); return }            // SEC-4
+        if let bid = context.frontmostBundleID, store.settings.appBlacklist.contains(bid) {
+            updateContext(with: word); return                                     // FR-32
+        }
+
+        let typed = layout.currentLayout()
+        let decision = engine.evaluate(word, typedLayout: typed, context: lastContextLayout)
+        lastReason = decision.reason.rawValue
+        guard decision.shouldConvert else { updateContext(with: word); return }
+
+        if store.settings.shadowMode {                                            // FR-20
+            record(decision, applied: false)
+            updateContext(with: word)
+            return
+        }
+
+        let deleteCount = word.count + (boundary != nil ? 1 : 0)
+        let insertText = decision.converted + (boundary.map(String.init) ?? "")
+        let snapshot = generation
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.generation == snapshot else { return }           // REL-5 race guard
+            self.layout.replace(deleteCount: deleteCount, with: insertText)
+            self.layout.select(decision.to)
+            self.feedback()
+            self.onConversionApplied?(decision.to)
+        }
+        conversionsApplied += 1
+        lastConversion = LastConversion(original: word, converted: decision.converted,
+                                        boundary: boundary, layoutBefore: decision.from)
+        lastContextLayout = decision.to
+        record(decision, applied: true)
+    }
+
+    /// Shared replace used by snippets / autofix (no layout switch).
+    private func applyReplacement(_ original: String, with text: String,
+                                  boundary: Character?, layoutAfter: Layout?) {
+        let deleteCount = original.count + (boundary != nil ? 1 : 0)
+        let insertText = text + (boundary.map(String.init) ?? "")
+        let snapshot = generation
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.generation == snapshot else { return }
+            self.layout.replace(deleteCount: deleteCount, with: insertText)
+            if let l = layoutAfter { self.layout.select(l) }
+        }
+        lastCompleted = LastWord(text: text, boundary: boundary)
+        lastConversion = LastConversion(original: original, converted: text,
+                                        boundary: boundary, layoutBefore: layout.currentLayout() ?? .en)
+    }
+
+    // MARK: - manual correction loop (FR-11/FR-12/FR-13)
+
+    /// Convert the in-progress or last-finished word to the other layout, and
+    /// switch the system layout. Idempotent-cycling: a second call swaps back.
+    func fix() {
+        // FR-12 selection granularity: if text is selected, convert its layout.
+        if let sel = AXText.selectedText(), sel.contains(where: { $0.isLetter }) {
+            let from = sel.dominantLayout ?? layout.currentLayout() ?? .en
+            let to = from.other
+            AXText.replaceSelection(with: KeyMap.convert(sel, to: to))
+            layout.select(to)
+            onConversionApplied?(to)
+            return
+        }
+        let target: (text: String, boundary: Character?, inProgress: Bool)
+        if !buffer.isEmpty {
+            target = (buffer.word, nil, true)
+        } else if let last = lastCompleted {
+            target = (last.text, last.boundary, false)
+        } else {
+            return
+        }
+        let from = target.text.dominantLayout ?? layout.currentLayout() ?? .en
+        let to = from.other
+        let converted = KeyMap.convert(target.text, to: to)
+        let deleteCount = target.text.count + (target.boundary != nil ? 1 : 0)
+        let insertText = converted + (target.boundary.map(String.init) ?? "")
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.layout.replace(deleteCount: deleteCount, with: insertText)
+            self.layout.select(to)
+            self.feedback()
+            self.onConversionApplied?(to)
+        }
+        // Enable the cycle: next fix swaps the converted form back.
+        if target.inProgress { buffer.reset() }
+        lastCompleted = LastWord(text: converted, boundary: target.boundary)
+        lastConversion = LastConversion(original: target.text, converted: converted,
+                                        boundary: target.boundary, layoutBefore: from)
+        onChange?()
+    }
+
+    /// Manual layout switch (FR-13 / scenario 4.5 — double ⇧). Does NOT convert
+    /// any text; single ⇧ for capitals is untouched (handled in InputCapture).
+    func toggleLayout() {
+        buffer.reset()
+        guard let cur = layout.currentLayout() else { layout.toggle(); onChange?(); return }
+        let to = cur.other
+        layout.select(to)
+        onConversionApplied?(to)
+        onChange?()
+    }
+
+    /// FR-12 line granularity / scenario 4.4: convert the whole line at the caret.
+    func convertCurrentLine() {
+        guard let (text, caret) = AXText.focusedValueAndCaret() else { return }
+        let ns = text as NSString
+        let loc = max(0, min(caret, ns.length))
+        var range = ns.lineRange(for: NSRange(location: loc, length: 0))
+        // Drop a trailing newline so we convert text only.
+        if range.length > 0, ns.character(at: range.location + range.length - 1) == 10 {
+            range.length -= 1
+        }
+        guard range.length > 0 else { return }
+        let line = ns.substring(with: range)
+        guard line.contains(where: { $0.isLetter }) else { return }
+        let from = line.dominantLayout ?? layout.currentLayout() ?? .en
+        let to = from.other
+        let converted = KeyMap.convert(line, to: to)
+        if AXText.setSelectedRange(location: range.location, length: range.length),
+           AXText.replaceSelection(with: converted) {
+            layout.select(to)
+            onConversionApplied?(to)
+            onChange?()
+        }
+    }
+
+    func toggleAuto() {
+        store.updateSettings { $0.autoConvertEnabled.toggle() }
+        onChange?()
+    }
+
+    func setShadowMode(_ on: Bool) {
+        store.updateSettings { $0.shadowMode = on }
+        onChange?()
+    }
+
+    /// Reverse the last conversion and learn from it (FR-15 + FR-18).
+    func undo() {
+        guard let lc = lastConversion else { return }
+        let deleteCount = lc.converted.count + (lc.boundary != nil ? 1 : 0)
+        let insertText = lc.original + (lc.boundary.map(String.init) ?? "")
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.layout.replace(deleteCount: deleteCount, with: insertText)
+            self.layout.select(lc.layoutBefore)
+        }
+        store.recordRevert(lc.original)            // stop auto-converting this word
+        engine.learnedReverts = store.revertedWords()
+        lastCompleted = LastWord(text: lc.original, boundary: lc.boundary)
+        lastConversion = nil
+        onChange?()
+    }
+
+    // MARK: - shadow review actions (FR-21)
+
+    func addToExceptions(_ word: String) {
+        store.updateData { $0.exceptions.insert(word.lowercased()) }
+        engine.exceptions = store.data.exceptions
+        onChange?()
+    }
+    func addToWhitelist(_ word: String) {
+        store.updateData { $0.whitelistLatin.insert(word.lowercased()) }
+        engine.whitelistLatin = store.data.whitelistLatin
+        onChange?()
+    }
+
+    func currentLayout() -> Layout? { layout.currentLayout() }
+
+    // MARK: - text tools on selection (FR-23/24/25)
+
+    func transliterateSelection() {
+        guard let sel = AXText.selectedText() else { return }
+        AXText.replaceSelection(with: Transliterator.transliterate(sel))
+    }
+    func cycleCaseSelection() {
+        guard let sel = AXText.selectedText() else { return }
+        AXText.replaceSelection(with: CaseConverter.cycle(sel))
+    }
+    func fixCapsSelection() {
+        guard let sel = AXText.selectedText() else { return }
+        AXText.replaceSelection(with: TextFixes.fixCapsLock(TextFixes.fixDoubleCapital(sel)))
+    }
+
+    // MARK: - focus changes (FR-4/5/6, FR-31)
+
+    /// Caret/field/app changed: reset the word, refresh fullscreen state, and
+    /// proactively set the layout *before* the user types.
+    func handleFocusChange() {
+        resetWordState()
+        fullscreenActive = store.settings.disableInFullscreen && AXText.isFrontmostFullscreen()
+        proactiveLayout()
+        onChange?()
+    }
+
+    private func proactiveLayout() {
+        let role = context.focusedRole()
+        if store.settings.latinForUrlEmailSearch,
+           role == .secure || role == .search || role == .urlOrEmail {
+            layout.select(.en); return                                            // FR-5
+        }
+        guard store.settings.rememberLayoutPerApp, let bid = context.frontmostBundleID,
+              let remembered = store.recalledLayout(bundleID: bid, role: context.roleKey()) else { return }
+        layout.select(remembered)                                                 // FR-4
+    }
+
+    // MARK: - helpers
+
+    private func updateContext(with word: String) {
+        guard let l = word.dominantLayout else { return }
+        lastContextLayout = l
+        // FR-4: remember the settled layout per app+field (write only on change).
+        if store.settings.rememberLayoutPerApp, let bid = context.frontmostBundleID {
+            let rk = context.roleKey()
+            if store.recalledLayout(bundleID: bid, role: rk) != l {
+                store.rememberLayout(l, bundleID: bid, role: rk)
+            }
+        }
+    }
+
+    private func resetWordState() {
+        buffer.reset()
+        lastCompleted = nil
+        lastConversion = nil
+    }
+
+    private func record(_ d: Decision, applied: Bool) {
+        shadowCounter += 1
+        let entry = ShadowEntry(id: shadowCounter, original: d.original, converted: d.converted,
+                                from: d.from, to: d.to, confidence: d.confidence,
+                                reason: d.reason, applied: applied)
+        shadowLog.insert(entry, at: 0)
+        if shadowLog.count > shadowCap { shadowLog.removeLast() }
+        onChange?()
+    }
+
+    private func feedback() {
+        if store.settings.soundOnConvert { NSSound.beep() }
+        // flashOnConvert: visual flash overlay — TODO (E5.5); off by default.
+    }
+}
