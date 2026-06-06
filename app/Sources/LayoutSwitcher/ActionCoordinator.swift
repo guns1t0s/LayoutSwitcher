@@ -88,7 +88,7 @@ final class ActionCoordinator: InputCaptureDelegate {
     }
 
     func inputDidDoubleShift() {
-        if store.settings.doubleShiftSwitchLayout { toggleLayout() }   // 4.5: manual switch
+        if store.settings.doubleShiftConvertWord { fix() }   // convert last word + switch layout
     }
 
     func inputDidClick() { resetWordState() }
@@ -348,6 +348,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         buffer.reset()
         lastCompleted = nil
         lastConversion = nil
+        lastContextLayout = nil   // drop stale surrounding-language context (cut random n-gram bias)
     }
 
     private func record(_ d: Decision, applied: Bool) {
