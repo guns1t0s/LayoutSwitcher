@@ -22,7 +22,13 @@ cat > "$PLIST" <<EOF
     <key>Label</key><string>$LABEL</string>
     <key>ProgramArguments</key><array><string>$BIN</string></array>
     <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><true/>
+    <!-- Relaunch only on a crash (non-zero exit), NOT on a clean user Quit.
+         KeepAlive:true would relaunch even when you quit, so you could never
+         close the app. SuccessfulExit:false = restart on crash only. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key><false/>
+    </dict>
     <key>ProcessType</key><string>Interactive</string>
 </dict>
 </plist>
