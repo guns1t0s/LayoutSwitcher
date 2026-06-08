@@ -123,7 +123,6 @@ struct SettingsView: View {
             Toggle("Shadow-mode (только лог, не меняет текст)", isOn: $model.settings.shadowMode)
             Toggle("Автозапуск при входе", isOn: $model.settings.startAtLogin)
             Divider()
-            Toggle("Индикатор в строке меню", isOn: $model.settings.showMenuBarIndicator)
             Toggle("Индикатор у курсора", isOn: $model.settings.showCaretIndicator)
             Toggle("Всплывающее уведомление при переключении", isOn: $model.settings.showSwitchToast)
             Divider()
