@@ -35,6 +35,17 @@ final class KeystrokeBufferMoreTests: XCTestCase {
         XCTAssertEqual(b.input("\t").completedWord, "x")
     }
 
+    func testMentionSymbolsStayInWord() {
+        // @ # _ and RU twins (" №) attach to the word, so a mention is one token.
+        let b = KeystrokeBuffer()
+        let done = feed(b, "@user")
+        XCTAssertEqual(done, [])            // no boundary emitted
+        XCTAssertEqual(b.word, "@user")
+        let b2 = KeystrokeBuffer()
+        _ = feed(b2, "\"фтшлщтщкщм")        // @anikonorov typed on RU
+        XCTAssertEqual(b2.word, "\"фтшлщтщкщм")
+    }
+
     func testHyphenSplitsWord() {
         let b = KeystrokeBuffer()
         let done = feed(b, "co-op")
