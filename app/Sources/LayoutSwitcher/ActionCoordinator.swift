@@ -178,29 +178,50 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// Convert the in-progress or last-finished word to the other layout, and
     /// switch the system layout. Idempotent-cycling: a second call swaps back.
     func fix() {
-        // FR-12 selection granularity: if text is selected, convert its layout.
-        if let sel = AXText.selectedText(), sel.contains(where: { $0.isLetter }) {
-            let from = sel.dominantLayout ?? layout.currentLayout() ?? .en
-            let to = from.other
-            AXText.replaceSelection(with: KeyMap.convert(sel, to: to))
-            layout.select(to)
-            onConversionApplied?(to)
-            return
-        }
-        let target: (text: String, boundary: Character?, inProgress: Bool)
+        // 1) Actively typing → convert the in-progress word (fast, no clipboard).
         if !buffer.isEmpty {
-            target = (buffer.word, nil, true)
-        } else if let last = lastCompleted {
-            target = (last.text, last.boundary, false)
-        } else {
-            return
+            fixWord(buffer.word, boundary: nil, inProgress: true); return
         }
-        let from = target.text.dominantLayout ?? layout.currentLayout() ?? .en
-        let to = from.other
-        let converted = KeyMap.convert(target.text, to: to)
-        let deleteCount = target.text.count + (target.boundary != nil ? 1 : 0)
-        let insertText = converted + (target.boundary.map(String.init) ?? "")
+        // 2) Selection exposed via Accessibility (native apps). Write via paste
+        //    (AX selection writes silently fail in many apps).
+        if let sel = AXText.selectedText(), sel.contains(where: { $0.isLetter }) {
+            convertSelection(sel); return
+        }
+        // 3) Selection in Electron/chat apps where AX is blind → clipboard probe;
+        //    if nothing is selected, fall back to fixing the last finished word.
+        var target: Layout?
+        layout.convertSelectionViaClipboard(transform: { [weak self] sel in
+            let from = sel.dominantLayout ?? self?.layout.currentLayout() ?? .en
+            target = from.other
+            return KeyMap.convert(sel, to: from.other)
+        }, completion: { [weak self] handled in
+            guard let self else { return }
+            if handled {
+                if let to = target { self.layout.select(to); self.onConversionApplied?(to) }
+                self.onChange?()
+            } else if let last = self.lastCompleted {
+                self.fixWord(last.text, boundary: last.boundary, inProgress: false)
+            }
+        })
+    }
 
+    /// Convert an AX-detected selection, writing back via the clipboard/paste.
+    private func convertSelection(_ sel: String) {
+        let from = sel.dominantLayout ?? layout.currentLayout() ?? .en
+        let to = from.other
+        layout.paste(KeyMap.convert(sel, to: to))
+        layout.select(to)
+        onConversionApplied?(to)
+        onChange?()
+    }
+
+    /// Convert a single word in place via synthetic Backspace + insert.
+    private func fixWord(_ text: String, boundary: Character?, inProgress: Bool) {
+        let from = text.dominantLayout ?? layout.currentLayout() ?? .en
+        let to = from.other
+        let converted = KeyMap.convert(text, to: to)
+        let deleteCount = text.count + (boundary != nil ? 1 : 0)
+        let insertText = converted + (boundary.map(String.init) ?? "")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.layout.replace(deleteCount: deleteCount, with: insertText)
@@ -208,11 +229,11 @@ final class ActionCoordinator: InputCaptureDelegate {
             self.feedback()
             self.onConversionApplied?(to)
         }
-        // Enable the cycle: next fix swaps the converted form back.
-        if target.inProgress { buffer.reset() }
-        lastCompleted = LastWord(text: converted, boundary: target.boundary)
-        lastConversion = LastConversion(original: target.text, converted: converted,
-                                        boundary: target.boundary, layoutBefore: from)
+        if inProgress { buffer.reset() }
+        // Enable the cycle: a second double-⇧ swaps the converted form back.
+        lastCompleted = LastWord(text: converted, boundary: boundary)
+        lastConversion = LastConversion(original: text, converted: converted,
+                                        boundary: boundary, layoutBefore: from)
         onChange?()
     }
 
@@ -295,17 +316,17 @@ final class ActionCoordinator: InputCaptureDelegate {
 
     // MARK: - text tools on selection (FR-23/24/25)
 
-    func transliterateSelection() {
-        guard let sel = AXText.selectedText() else { return }
-        AXText.replaceSelection(with: Transliterator.transliterate(sel))
-    }
-    func cycleCaseSelection() {
-        guard let sel = AXText.selectedText() else { return }
-        AXText.replaceSelection(with: CaseConverter.cycle(sel))
-    }
-    func fixCapsSelection() {
-        guard let sel = AXText.selectedText() else { return }
-        AXText.replaceSelection(with: TextFixes.fixCapsLock(TextFixes.fixDoubleCapital(sel)))
+    func transliterateSelection() { convertSelectionTool { Transliterator.transliterate($0) } }
+    func cycleCaseSelection() { convertSelectionTool { CaseConverter.cycle($0) } }
+    func fixCapsSelection() { convertSelectionTool { TextFixes.fixCapsLock(TextFixes.fixDoubleCapital($0)) } }
+
+    /// Apply a transform to the current selection. AX read + paste where exposed,
+    /// otherwise a clipboard copy/paste round-trip (Electron/chat apps).
+    private func convertSelectionTool(_ transform: @escaping (String) -> String) {
+        if let sel = AXText.selectedText(), !sel.isEmpty {
+            layout.paste(transform(sel)); return
+        }
+        layout.convertSelectionViaClipboard(transform: transform) { _ in }
     }
 
     // MARK: - focus changes (FR-4/5/6, FR-31)
