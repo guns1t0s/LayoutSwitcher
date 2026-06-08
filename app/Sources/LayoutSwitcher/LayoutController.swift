@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Carbon
 import CoreGraphics
 import SwitcherCore
@@ -59,19 +60,68 @@ final class LayoutController {
               let up = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false) else { return }
         var utf16 = Array(text.utf16)
         down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
+        down.flags = []; up.flags = []          // never inherit a held modifier
         down.setIntegerValueField(.eventSourceUserData, value: K.syntheticTag)
         up.setIntegerValueField(.eventSourceUserData, value: K.syntheticTag)
         down.post(tap: .cgSessionEventTap)
         up.post(tap: .cgSessionEventTap)
     }
 
-    private func postKey(virtualKey: CGKeyCode) {
+    private func postKey(virtualKey: CGKeyCode, flags: CGEventFlags = []) {
         guard let down = CGEvent(keyboardEventSource: src, virtualKey: virtualKey, keyDown: true),
               let up = CGEvent(keyboardEventSource: src, virtualKey: virtualKey, keyDown: false) else { return }
+        // Explicit flags so a physically-held ⇧ (from the double-⇧ gesture) is
+        // NOT applied to our Backspaces — that left the first letter unconverted.
+        down.flags = flags; up.flags = flags
         down.setIntegerValueField(.eventSourceUserData, value: K.syntheticTag)
         up.setIntegerValueField(.eventSourceUserData, value: K.syntheticTag)
         down.post(tap: .cgSessionEventTap)
         up.post(tap: .cgSessionEventTap)
+    }
+
+    // MARK: - clipboard-based selection edit (Electron / chat apps)
+
+    /// Replace the current selection with `text` via Cmd+V, preserving the user's
+    /// clipboard. Reliable where AX selection writes silently fail.
+    func paste(_ text: String) {
+        let saved = savePasteboard()
+        let pb = NSPasteboard.general
+        pb.clearContents(); pb.setString(text, forType: .string)
+        postKey(virtualKey: CGKeyCode(kVK_ANSI_V), flags: .maskCommand)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.restorePasteboard(saved) }
+    }
+
+    /// Copy the current selection, transform it, paste it back. `completion(false)`
+    /// if nothing was selected (caller can fall back to last-word fix).
+    func convertSelectionViaClipboard(transform: @escaping (String) -> String,
+                                      completion: @escaping (Bool) -> Void) {
+        let pb = NSPasteboard.general
+        let saved = savePasteboard()
+        let before = pb.changeCount
+        postKey(virtualKey: CGKeyCode(kVK_ANSI_C), flags: .maskCommand)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            guard pb.changeCount != before,
+                  let sel = pb.string(forType: .string), !sel.isEmpty else {
+                self.restorePasteboard(saved); completion(false); return
+            }
+            pb.clearContents(); pb.setString(transform(sel), forType: .string)
+            self.postKey(virtualKey: CGKeyCode(kVK_ANSI_V), flags: .maskCommand)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.restorePasteboard(saved) }
+            completion(true)
+        }
+    }
+
+    private func savePasteboard() -> [NSPasteboardItem] {
+        (NSPasteboard.general.pasteboardItems ?? []).map { item in
+            let copy = NSPasteboardItem()
+            for t in item.types { if let d = item.data(forType: t) { copy.setData(d, forType: t) } }
+            return copy
+        }
+    }
+    private func restorePasteboard(_ items: [NSPasteboardItem]) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        if !items.isEmpty { pb.writeObjects(items) }
     }
 
     // MARK: - TIS helpers
