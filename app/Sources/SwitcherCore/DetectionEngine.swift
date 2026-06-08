@@ -85,6 +85,9 @@ public final class DetectionEngine: @unchecked Sendable {
         let target = current.other
         let altForm = KeyMap.convert(core, to: target)
         let altLC = altForm.lowercased()
+        // The output converts the WHOLE token (leading/trailing symbols too, e.g.
+        // "\"фтшлщтщкщм" → "@anikonorov"); `core` stays trimmed for dictionary work.
+        let fullConverted = KeyMap.convert(token, to: target)
 
         // --- Hard lexicon gates -------------------------------------------------
         // Never touch user exceptions or words the user reverted by hand.
@@ -96,7 +99,7 @@ public final class DetectionEngine: @unchecked Sendable {
         // currently cyrillic, swap to latin; if already latin, leave it.
         if current == .ru, whitelistLatin.contains(altLC) {
             return Decision(shouldConvert: true, from: .ru, to: .en,
-                            original: token, converted: applyShape(of: core, to: altForm),
+                            original: token, converted: fullConverted,
                             confidence: 1.0, reason: .whitelistedLatin)
         }
         if current == .en, whitelistLatin.contains(lc) {
@@ -119,14 +122,14 @@ public final class DetectionEngine: @unchecked Sendable {
         }
         if altIsWord && !curIsWord {
             return Decision(shouldConvert: true, from: current, to: target,
-                            original: token, converted: applyShape(of: core, to: altForm),
+                            original: token, converted: fullConverted,
                             confidence: 1.0, reason: .altIsWord)
         }
         if curIsWord && altIsWord {
             // Valid both ways (e.g. "ctj" vs "сей"): default to leaving it.
             if config.convertAmbiguous, let ctx = context, ctx == target {
                 return Decision(shouldConvert: true, from: current, to: target,
-                                original: token, converted: applyShape(of: core, to: altForm),
+                                original: token, converted: fullConverted,
                                 confidence: 0.6, reason: .ngramMargin)
             }
             return .noop(token, layout: current, reason: .ambiguousBothValid)
@@ -147,7 +150,7 @@ public final class DetectionEngine: @unchecked Sendable {
         // thing we must avoid. Misses are fine — double-⇧ fixes them by hand.
         if margin >= config.ngramMinMargin && confidence >= config.threshold {
             return Decision(shouldConvert: true, from: current, to: target,
-                            original: token, converted: applyShape(of: core, to: altForm),
+                            original: token, converted: fullConverted,
                             confidence: confidence, reason: .ngramMargin)
         }
         return .noop(token, layout: current, reason: .belowThreshold)
@@ -157,19 +160,6 @@ public final class DetectionEngine: @unchecked Sendable {
 
     private let punctuation = CharacterSet.punctuationCharacters
         .union(.whitespacesAndNewlines).union(.symbols)
-
-    /// Preserve the original capitalisation shape on the converted word
-    /// (ALL CAPS, Title, lower) so "Привет"→"Privet" not "privet".
-    private func applyShape(of original: String, to converted: String) -> String {
-        if original.count > 1, original == original.uppercased(),
-           original != original.lowercased() {
-            return converted.uppercased()
-        }
-        if let f = original.first, f.isUppercase {
-            return converted.prefix(1).uppercased() + converted.dropFirst()
-        }
-        return converted
-    }
 
     private func sigmoid(_ x: Double) -> Double { 1.0 / (1.0 + exp(-x)) }
 }

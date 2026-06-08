@@ -18,9 +18,15 @@ public final class KeystrokeBuffer {
 
     public init() {}
 
+    /// Symbols that attach to a word rather than ending it: @mentions, #hashtags,
+    /// snake_case, and their RU-layout twins (Shift+2 → ", Shift+3 → №). Keeping
+    /// them in the token lets conversion flip "фтшлщтщкщм → @anikonorov" whole.
+    private static let wordSymbols: Set<Character> = ["@", "#", "_", "\"", "№"]
+
     /// Characters that end a word.
     private func isBoundary(_ c: Character) -> Bool {
-        c == " " || c == "\n" || c == "\t" || c == "\r"
+        if KeystrokeBuffer.wordSymbols.contains(c) { return false }
+        return c == " " || c == "\n" || c == "\t" || c == "\r"
             || c.isPunctuation || c.isSymbol
     }
 

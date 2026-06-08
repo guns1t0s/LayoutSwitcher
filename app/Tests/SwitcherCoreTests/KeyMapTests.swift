@@ -30,6 +30,17 @@ final class KeyMapTests: XCTestCase {
         XCTAssertEqual(KeyMap.convert("abc 123", to: .ru), "фис 123")
     }
 
+    func testSpecialSymbols() {
+        // @ mention typed on RU layout ("=Shift+2) round-trips to @.
+        XCTAssertEqual(KeyMap.convert("@anikonorov", to: .ru), "\"фтшлщтщкщм")
+        XCTAssertEqual(KeyMap.convert("\"фтшлщтщкщм", to: .en), "@anikonorov")
+        // Shifted number-row symbols that differ between layouts.
+        XCTAssertEqual(KeyMap.convert("@#$^&", to: .ru), "\"№;:?")
+        XCTAssertEqual(KeyMap.convert("\"№;:?", to: .en), "@#$^&")
+        // Identical ones pass through.
+        XCTAssertEqual(KeyMap.convert("!%*()", to: .ru), "!%*()")
+    }
+
     func testDominantLayout() {
         XCTAssertEqual("привет".dominantLayout, .ru)
         XCTAssertEqual("hello".dominantLayout, .en)

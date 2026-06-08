@@ -33,6 +33,7 @@ enum SelfTest {
         eq("case", CaseConverter.cycle("hello"), "HELLO")
         eq("fixcaps", TextFixes.fixCapsLock("tHE"), "The")
         eq("snippet", Snippets.expand("брб", using: ["брб": "буду рядом быстро"]) ?? "nil", "буду рядом быстро")
+        eq("mention", KeyMap.convert("\"фтшлщтщкщм", to: .en), "@anikonorov")
         exit(ok ? 0 : 1)
     }
 }
