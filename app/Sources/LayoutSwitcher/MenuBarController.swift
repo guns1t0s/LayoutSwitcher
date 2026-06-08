@@ -17,8 +17,22 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        loadMenuBarIcon()
         refreshTitle()
         observeLayoutChanges()
+    }
+
+    private var hasIcon = false
+
+    /// Template glyph from the bundle (auto light/dark). Optional.
+    private func loadMenuBarIcon() {
+        guard let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png"),
+              let img = NSImage(contentsOf: url) else { return }
+        img.isTemplate = true
+        img.size = NSSize(width: 18, height: 18)
+        statusItem.button?.image = img
+        statusItem.button?.imagePosition = .imageLeading
+        hasIcon = true
     }
 
     // MARK: - title / indicator (FR-1/FR-2/FR-3)
@@ -26,12 +40,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func refreshTitle() {
         let s = coordinator.store.settings
         let badge = s.shadowMode ? "◎" : (s.autoConvertEnabled ? "●" : "○")
-        // FR-3: the layout indicator can be turned off independently.
+        // FR-3: the layout indicator can be turned off independently. With the
+        // brand glyph present, keep the text compact (leading space separates it).
         if s.showMenuBarIndicator {
             let layout = coordinator.currentLayout()?.short ?? "—"
-            statusItem.button?.title = "\(badge) \(layout)"
+            statusItem.button?.title = "\(hasIcon ? " " : "")\(badge)\(layout)"
         } else {
-            statusItem.button?.title = badge
+            statusItem.button?.title = ""
         }
     }
 
