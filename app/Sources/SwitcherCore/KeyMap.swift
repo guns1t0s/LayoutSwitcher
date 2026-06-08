@@ -15,10 +15,16 @@ public enum KeyMap {
     static let enUpper = "~QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>?"
     static let ruUpper = "ЁЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,"
 
-    private static let enToRu: [Character: Character] = buildMap(from: enLower + enUpper,
-                                                                 to: ruLower + ruUpper)
-    private static let ruToEn: [Character: Character] = buildMap(from: ruLower + ruUpper,
-                                                                 to: enLower + enUpper)
+    // Shifted number-row symbols that DIFFER between layouts (same physical key):
+    //   Shift+2 @↔"   Shift+3 #↔№   Shift+4 $↔;   Shift+6 ^↔:   Shift+7 &↔?
+    // The matching ones (! % * ( )) are identical → they pass through unchanged.
+    static let enSym = "@#$^&"
+    static let ruSym = "\"№;:?"
+
+    private static let enToRu: [Character: Character] = buildMap(from: enLower + enUpper + enSym,
+                                                                 to: ruLower + ruUpper + ruSym)
+    private static let ruToEn: [Character: Character] = buildMap(from: ruLower + ruUpper + ruSym,
+                                                                 to: enLower + enUpper + enSym)
 
     private static func buildMap(from: String, to: String) -> [Character: Character] {
         var m = [Character: Character]()
