@@ -42,15 +42,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // MARK: - title / indicator (FR-1/FR-2/FR-3)
 
     func refreshTitle() {
-        let s = coordinator.store.settings
-        let badge = s.shadowMode ? "◎" : (s.autoConvertEnabled ? "●" : "○")
-        // FR-3: the layout indicator can be turned off independently. With the
-        // brand glyph present, keep the text compact (leading space separates it).
-        if s.showMenuBarIndicator {
-            let layout = coordinator.currentLayout()?.short ?? "—"
-            statusItem.button?.title = "\(hasIcon ? " " : "")\(badge)\(layout)"
-        } else {
+        // Icon-only menu bar — no layout/state text (keeps it uncluttered). The
+        // current layout still shows in the dropdown header and the caret overlay.
+        if hasIcon {
             statusItem.button?.title = ""
+        } else {
+            // No icon asset loaded → fall back to text so the item stays clickable.
+            statusItem.button?.title = coordinator.currentLayout()?.short ?? "ЯА"
         }
     }
 
