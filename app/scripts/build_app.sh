@@ -23,6 +23,26 @@ cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Sources/SwitcherCore/Resources/ru_words.txt" "$APP/Contents/Resources/"
 cp "$ROOT/Sources/SwitcherCore/Resources/en_words.txt" "$APP/Contents/Resources/"
 
+# App icon: build AppIcon.icns from Resources/icon/AppIcon.png (optional).
+APPICON="$ROOT/Resources/icon/AppIcon.png"
+if [ -f "$APPICON" ]; then
+    echo "==> generating AppIcon.icns"
+    ICONSET="$(mktemp -d)/AppIcon.iconset"; mkdir -p "$ICONSET"
+    for s in 16 32 128 256 512; do
+        sips -z "$s" "$s"            "$APPICON" --out "$ICONSET/icon_${s}x${s}.png"    >/dev/null
+        sips -z "$((s*2))" "$((s*2))" "$APPICON" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+    done
+    iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+    rm -rf "$(dirname "$ICONSET")"
+else
+    echo "   (no Resources/icon/AppIcon.png — skipping app icon)"
+fi
+
+# Menu-bar template glyph (optional). Loaded as a template image at runtime.
+MENUICON="$ROOT/Resources/icon/MenuBarIcon.png"
+[ -f "$MENUICON" ] && cp "$MENUICON" "$APP/Contents/Resources/MenuBarIcon.png" \
+    || echo "   (no Resources/icon/MenuBarIcon.png — menu bar uses text badge)"
+
 # Prefer the stable self-signed identity (scripts/make_cert.sh) so TCC grants
 # persist across rebuilds; fall back to ad-hoc (grants reset every build).
 IDENTITY="-"
