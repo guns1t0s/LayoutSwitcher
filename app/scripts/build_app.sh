@@ -26,7 +26,7 @@ cp "$ROOT/Sources/SwitcherCore/Resources/en_words.txt" "$APP/Contents/Resources/
 # Prefer the stable self-signed identity (scripts/make_cert.sh) so TCC grants
 # persist across rebuilds; fall back to ad-hoc (grants reset every build).
 IDENTITY="-"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "LayoutSwitcher Dev"; then
+if security find-identity -p codesigning 2>/dev/null | grep -q "LayoutSwitcher Dev"; then
     IDENTITY="LayoutSwitcher Dev"
     echo "==> codesign (identity: $IDENTITY, hardened runtime)"
 else
