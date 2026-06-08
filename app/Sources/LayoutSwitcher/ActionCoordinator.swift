@@ -182,26 +182,26 @@ final class ActionCoordinator: InputCaptureDelegate {
         if !buffer.isEmpty {
             fixWord(buffer.word, boundary: nil, inProgress: true); return
         }
-        // 2) Selection exposed via Accessibility (native apps). Write via paste
-        //    (AX selection writes silently fail in many apps).
+        // 2) Selection exposed via Accessibility (native apps). Write via paste.
         if let sel = AXText.selectedText(), sel.contains(where: { $0.isLetter }) {
             convertSelection(sel); return
         }
-        // 3) Selection in Electron/chat apps where AX is blind → clipboard probe;
-        //    if nothing is selected, fall back to fixing the last finished word.
+        // 3) Last finished word (e.g. "пшерги " + double-⇧ → "github "). This must
+        //    come BEFORE the clipboard probe — a Cmd+C with nothing selected is
+        //    unreliable in chat/Electron apps and would swallow this common case.
+        if let last = lastCompleted {
+            fixWord(last.text, boundary: last.boundary, inProgress: false); return
+        }
+        // 4) No typed-word state (after a click / arrow-key selection that reset it)
+        //    → a real selection in an app where AX is blind: clipboard round-trip.
         var target: Layout?
         layout.convertSelectionViaClipboard(transform: { [weak self] sel in
             let from = sel.dominantLayout ?? self?.layout.currentLayout() ?? .en
             target = from.other
             return KeyMap.convert(sel, to: from.other)
         }, completion: { [weak self] handled in
-            guard let self else { return }
-            if handled {
-                if let to = target { self.layout.select(to); self.onConversionApplied?(to) }
-                self.onChange?()
-            } else if let last = self.lastCompleted {
-                self.fixWord(last.text, boundary: last.boundary, inProgress: false)
-            }
+            guard let self, handled, let to = target else { return }
+            self.layout.select(to); self.onConversionApplied?(to); self.onChange?()
         })
     }
 
