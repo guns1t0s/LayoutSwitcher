@@ -38,11 +38,18 @@ else
     echo "   (no Resources/icon/AppIcon.png — skipping app icon)"
 fi
 
-# Menu-bar icon: a small COLOUR version of the app icon (not a template).
-if [ -f "$APPICON" ]; then
-    sips -z 36 36 "$APPICON" --out "$APP/Contents/Resources/MenuBarIcon.png" >/dev/null
+# Menu-bar icon: the provided monochrome TEMPLATE (16/32 px). The "Template"
+# name + alpha lets macOS recolour it for light/dark menu bars. Falls back to a
+# small colour version of the app icon if the template isn't present.
+MBT="$ROOT/Resources/icon/MenuBarIconTemplate.png"
+if [ -f "$MBT" ]; then
+    cp "$MBT" "$APP/Contents/Resources/MenuBarIconTemplate.png"
+    [ -f "$ROOT/Resources/icon/MenuBarIconTemplate@2x.png" ] && \
+        cp "$ROOT/Resources/icon/MenuBarIconTemplate@2x.png" "$APP/Contents/Resources/"
+elif [ -f "$APPICON" ]; then
+    sips -z 36 36 "$APPICON" --out "$APP/Contents/Resources/MenuBarIconTemplate.png" >/dev/null
 else
-    echo "   (no AppIcon.png — menu bar uses text badge)"
+    echo "   (no menu-bar icon — menu bar uses text badge)"
 fi
 
 # Prefer the stable self-signed identity (scripts/make_cert.sh) so TCC grants

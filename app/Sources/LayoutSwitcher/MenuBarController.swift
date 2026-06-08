@@ -24,13 +24,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private var hasIcon = false
 
-    /// Colour app-icon glyph from the bundle (not a template — keeps colour). Optional.
+    /// Monochrome template glyph (system recolours it for light/dark menu bars).
+    /// `NSImage(named:)` picks up the @2x variant; the "Template" name sets
+    /// isTemplate automatically. Optional.
     private func loadMenuBarIcon() {
-        guard let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png"),
-              let img = NSImage(contentsOf: url) else { return }
-        img.isTemplate = false
-        img.size = NSSize(width: 18, height: 18)
-        statusItem.button?.image = img
+        let img = NSImage(named: NSImage.Name("MenuBarIconTemplate"))
+            ?? Bundle.main.url(forResource: "MenuBarIconTemplate", withExtension: "png")
+                .flatMap { NSImage(contentsOf: $0) }
+        guard let icon = img else { return }
+        icon.isTemplate = true
+        icon.size = NSSize(width: 16, height: 16)
+        statusItem.button?.image = icon
         statusItem.button?.imagePosition = .imageLeading
         hasIcon = true
     }
