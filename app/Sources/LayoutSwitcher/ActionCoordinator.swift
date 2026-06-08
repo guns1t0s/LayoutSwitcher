@@ -334,6 +334,12 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// Caret/field/app changed: reset the word, refresh fullscreen state, and
     /// proactively set the layout *before* the user types.
     func handleFocusChange() {
+        // Electron/chat apps spam focused-element-changed while you type. Acting
+        // on those mid-word would reset the buffer and flip the layout in the
+        // MIDDLE of a word ("сообщение" → "сооб"+"otybt"). A genuine field switch
+        // goes through a click / arrow key, which already cleared the buffer — so
+        // only react when we're between words.
+        guard buffer.isEmpty else { return }
         resetWordState()
         fullscreenActive = store.settings.disableInFullscreen && AXText.isFrontmostFullscreen()
         proactiveLayout()
