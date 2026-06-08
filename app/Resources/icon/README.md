@@ -1,13 +1,15 @@
 # Icons
 
-Drop the source icon here; `scripts/build_app.sh` embeds it into the .app.
+Source assets; `scripts/build_app.sh` embeds them into the .app.
 
 | File | What | Notes |
 |---|---|---|
-| `AppIcon.png` | App icon (the purple "Я⇄A" keycap) | square, ideally 1024×1024 |
+| `AppIcon.png` | App icon — colour "ЯА" squircle | 1024×1024 → `AppIcon.icns`, `CFBundleIconFile` |
+| `MenuBarIconTemplate.png` / `@2x` | Menu-bar glyph — monochrome **template** | 16 / 32 px; macOS recolours it for light/dark |
+| `AppIcon.svg`, `MenuBarIcon.svg` | Vector sources (curves) | for re-export |
 
-`build_app.sh`:
-- generates `AppIcon.icns` from `AppIcon.png` (`sips`/`iconutil`) and sets `CFBundleIconFile` — Finder / Get Info / About;
-- generates a small colour `MenuBarIcon.png` (36²) from the same source; `MenuBarController` shows it in the menu bar (in colour, beside the RU/EN indicator).
+Design rule (from the asset author): **colour only in the app icon**; in the menu
+bar it's a single tone + alpha and the system recolours it. `MenuBarController`
+loads `MenuBarIconTemplate` as a template image beside the RU/EN indicator.
 
-Optional — without `AppIcon.png` the build still works (menu bar falls back to a text badge).
+Without these files the build still works (menu bar falls back to a text badge).
