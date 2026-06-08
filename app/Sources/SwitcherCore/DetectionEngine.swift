@@ -85,9 +85,11 @@ public final class DetectionEngine: @unchecked Sendable {
         let target = current.other
         let altForm = KeyMap.convert(core, to: target)
         let altLC = altForm.lowercased()
-        // The output converts the WHOLE token (leading/trailing symbols too, e.g.
-        // "\"фтшлщтщкщм" → "@anikonorov"); `core` stays trimmed for dictionary work.
-        let fullConverted = KeyMap.convert(token, to: target)
+        // Convert the token, but preserve LEADING/TRAILING sentence punctuation
+        // (a real trailing "." must stay "." — not become the letter "ю"). Inner
+        // punctuation and word-symbols (@ " etc.) are still converted, so
+        // "j,hfnyj"→"обратно" and "\"фтшлщтщкщм"→"@anikonorov" both work.
+        let fullConverted = Self.convertPreservingOuterPunct(token, to: target)
 
         // --- Hard lexicon gates -------------------------------------------------
         // Never touch user exceptions or words the user reverted by hand.
@@ -162,4 +164,15 @@ public final class DetectionEngine: @unchecked Sendable {
         .union(.whitespacesAndNewlines).union(.symbols)
 
     private func sigmoid(_ x: Double) -> Double { 1.0 / (1.0 + exp(-x)) }
+
+    /// Letter-mapping punctuation kept word-internal by KeystrokeBuffer. As the
+    /// OUTER char of a token it's real sentence punctuation → preserve it.
+    private static let softPunct: Set<Character> = [",", ".", ";", "'", "[", "]", "`"]
+
+    static func convertPreservingOuterPunct(_ token: String, to target: Layout) -> String {
+        var lead = "", trail = "", mid = Substring(token)
+        while let f = mid.first, softPunct.contains(f) { lead.append(f); mid = mid.dropFirst() }
+        while let l = mid.last, softPunct.contains(l) { trail = String(l) + trail; mid = mid.dropLast() }
+        return lead + KeyMap.convert(String(mid), to: target) + trail
+    }
 }
