@@ -74,4 +74,21 @@ final class DetectionEngineTests: XCTestCase {
         let e = engine(ru: [], en: [])
         XCTAssertFalse(e.evaluate("123").shouldConvert)
     }
+
+    // Russian word typed on EN layout whose letters include punctuation-keys
+    // ("б"→",") must convert WHOLE, not fragment.
+    func testFragmentedRussianWordConvertsWhole() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        let d = e.evaluate("j,hfnyj")          // обратно (comma = б)
+        XCTAssertTrue(d.shouldConvert)
+        XCTAssertEqual(d.converted, "обратно")
+    }
+
+    // A real trailing period stays a period (not converted to the letter "ю").
+    func testTrailingPunctuationPreserved() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        let d = e.evaluate("ghbdtn.")
+        XCTAssertTrue(d.shouldConvert)
+        XCTAssertEqual(d.converted, "привет.")
+    }
 }

@@ -13,11 +13,21 @@ final class KeystrokeBufferTests: XCTestCase {
         XCTAssertTrue(b.isEmpty)
     }
 
-    func testPunctuationIsBoundary() {
+    func testHardPunctuationIsBoundary() {
         let b = KeystrokeBuffer()
         for c in "hello" { _ = b.input(c) }
-        let step = b.input(".")
+        let step = b.input("!")          // "!" is a hard boundary
         XCTAssertEqual(step.completedWord, "hello")
+    }
+
+    func testLetterMappingPunctStaysInWord() {
+        // "," ";" etc. are RU letters on the EN layout — must NOT split the word,
+        // so "обратно" typed as "j,hfnyj" stays one token.
+        let b = KeystrokeBuffer()
+        var completed: [String] = []
+        for c in "j,hfnyj" { if let w = b.input(c).completedWord { completed.append(w) } }
+        XCTAssertEqual(completed, [])
+        XCTAssertEqual(b.word, "j,hfnyj")
     }
 
     func testBackspaceShortensWord() {
