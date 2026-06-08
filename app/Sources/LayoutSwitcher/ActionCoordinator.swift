@@ -331,17 +331,25 @@ final class ActionCoordinator: InputCaptureDelegate {
 
     // MARK: - focus changes (FR-4/5/6, FR-31)
 
-    /// Caret/field/app changed: reset the word, refresh fullscreen state, and
-    /// proactively set the layout *before* the user types.
+    private var lastBundleID: String?
+
+    /// Caret/field/app changed: refresh fullscreen state and, only on a real app
+    /// switch, proactively set the layout.
     func handleFocusChange() {
-        // Electron/chat apps spam focused-element-changed while you type. Acting
-        // on those mid-word would reset the buffer and flip the layout in the
-        // MIDDLE of a word ("сообщение" → "сооб"+"otybt"). A genuine field switch
-        // goes through a click / arrow key, which already cleared the buffer — so
-        // only react when we're between words.
+        // 1) Mid-word: ignore. Electron/chat apps spam focused-element-changed
+        //    while typing; acting on it would corrupt the word in progress.
         guard buffer.isEmpty else { return }
-        resetWordState()
         fullscreenActive = store.settings.disableInFullscreen && AXText.isFrontmostFullscreen()
+
+        // 2) Only switch layout when the FRONTMOST APP actually changed. A letter
+        //    typed in the wrong layout can emit punctuation (e.g. "б"→","), which
+        //    momentarily empties the buffer; a within-app focus event must NOT
+        //    flip the layout then, or the rest of the word lands in the other
+        //    layout ("Реб"+"енок" → "Ht,"+"енок").
+        let bid = context.frontmostBundleID
+        guard bid != lastBundleID else { return }
+        lastBundleID = bid
+        resetWordState()
         proactiveLayout()
         onChange?()
     }
