@@ -38,10 +38,12 @@ else
     echo "   (no Resources/icon/AppIcon.png — skipping app icon)"
 fi
 
-# Menu-bar template glyph (optional). Loaded as a template image at runtime.
-MENUICON="$ROOT/Resources/icon/MenuBarIcon.png"
-[ -f "$MENUICON" ] && cp "$MENUICON" "$APP/Contents/Resources/MenuBarIcon.png" \
-    || echo "   (no Resources/icon/MenuBarIcon.png — menu bar uses text badge)"
+# Menu-bar icon: a small COLOUR version of the app icon (not a template).
+if [ -f "$APPICON" ]; then
+    sips -z 36 36 "$APPICON" --out "$APP/Contents/Resources/MenuBarIcon.png" >/dev/null
+else
+    echo "   (no AppIcon.png — menu bar uses text badge)"
+fi
 
 # Prefer the stable self-signed identity (scripts/make_cert.sh) so TCC grants
 # persist across rebuilds; fall back to ad-hoc (grants reset every build).
