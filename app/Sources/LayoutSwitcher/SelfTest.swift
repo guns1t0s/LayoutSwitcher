@@ -25,6 +25,8 @@ enum SelfTest {
         check("ntrcn", expectConvert: true, expect: "текст")
         check("api", expectConvert: false)
         check("пшерги", expectConvert: true, expect: "github")
+        check("j,hfnyj", expectConvert: true, expect: "обратно")   // comma(б) kept in word
+        check("ghbdtn.", expectConvert: true, expect: "привет.")   // trailing period preserved
 
         func eq(_ label: String, _ got: String, _ want: String) {
             let pass = got == want; ok = ok && pass
