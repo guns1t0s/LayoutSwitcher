@@ -24,6 +24,7 @@ enum SelfTest {
         check("fetch", expectConvert: false)
         check("ntrcn", expectConvert: true, expect: "текст")
         check("api", expectConvert: false)
+        check("пшерги", expectConvert: true, expect: "github")
 
         func eq(_ label: String, _ got: String, _ want: String) {
             let pass = got == want; ok = ok && pass

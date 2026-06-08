@@ -34,7 +34,7 @@ final class DetectionCorpusTests: XCTestCase {
     }
 
     func testWrongLayoutEnglishIsFixed() {
-        for w in ["trust", "fetch", "server", "report"] {
+        for w in ["trust", "fetch", "server", "report", "github", "docker"] {
             let typed = KeyMap.convert(w, to: .ru)        // typed on RU layout
             let d = engine.evaluate(typed)
             XCTAssertTrue(d.shouldConvert, "did not fix '\(w)' typed as '\(typed)'")
