@@ -44,6 +44,22 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(s.revertedWords(min: 1), ["привет", "текст"])
     }
 
+    func testLearnWordAfterRepeatedManualFixes() {
+        let s = Store(directory: tempDir())          // default threshold = 3
+        XCTAssertFalse(s.recordManualFix("вроде"))    // 1
+        XCTAssertFalse(s.recordManualFix("вроде"))    // 2
+        XCTAssertTrue(s.recordManualFix("вроде"))     // 3 → learned
+        XCTAssertTrue(s.data.learnedWords.contains("вроде"))
+        XCTAssertFalse(s.recordManualFix("вроде"))    // already learned, no re-trigger
+    }
+
+    func testLearnDisabledWhenThresholdZero() {
+        let s = Store(directory: tempDir())
+        s.updateSettings { $0.learnAfterManualFixes = 0 }
+        XCTAssertFalse(s.recordManualFix("слово"))
+        XCTAssertTrue(s.data.learnedWords.isEmpty)
+    }
+
     func testImportWordsIntoWhitelist() {
         let s = Store(directory: tempDir())
         s.importWords(["API", " Sprint ", ""], into: \.whitelistLatin)

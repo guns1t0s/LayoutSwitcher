@@ -75,6 +75,16 @@ final class DetectionEngineTests: XCTestCase {
         XCTAssertFalse(e.evaluate("123").shouldConvert)
     }
 
+    func testLearnedWordTreatedAsDictionary() {
+        let e = engine(ru: [], en: [])
+        XCTAssertFalse(e.evaluate("dhjlt").shouldConvert)   // unknown → leave it
+        e.learnedWords = ["вроде"]                          // learned from manual fixes
+        let d = e.evaluate("dhjlt")
+        XCTAssertTrue(d.shouldConvert)
+        XCTAssertEqual(d.converted, "вроде")
+        XCTAssertEqual(d.reason, .altIsWord)
+    }
+
     // Russian word typed on EN layout whose letters include punctuation-keys
     // ("б"→",") must convert WHOLE, not fragment.
     func testFragmentedRussianWordConvertsWhole() {

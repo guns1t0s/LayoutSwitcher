@@ -15,6 +15,7 @@ final class SettingsModel: ObservableObject {
     @Published var whitelistText: String
     @Published var snippetsText: String
     @Published var blacklistText: String
+    @Published var learnedText: String
 
     /// Set by AppDelegate to re-bind global hotkeys live (scenario 9.3).
     var onHotkeysChanged: (() -> Void)?
@@ -37,6 +38,7 @@ final class SettingsModel: ObservableObject {
         self.snippetsText = store.data.snippets.map { "\($0.key) = \($0.value)" }
             .sorted().joined(separator: "\n")
         self.blacklistText = store.settings.appBlacklist.joined(separator: "\n")
+        self.learnedText = store.data.learnedWords.sorted().joined(separator: "\n")
     }
 
     private func persist() {
@@ -50,6 +52,7 @@ final class SettingsModel: ObservableObject {
             $0.exceptions = Set(tokens(exceptionsText))
             $0.whitelistLatin = Set(tokens(whitelistText))
             $0.snippets = parseSnippets(snippetsText)
+            $0.learnedWords = Set(tokens(learnedText))
         }
         settings.appBlacklist = blacklistText
             .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
@@ -162,14 +165,17 @@ struct SettingsView: View {
                 .frame(height: 110).border(.secondary)
             Text("Белый список «всегда латиница» (API, sprint, PR…):")
             TextEditor(text: $model.whitelistText).font(.system(.body, design: .monospaced))
-                .frame(height: 90).border(.secondary)
-            Text("Чёрный список приложений (bundle id), по одному в строке:")
+                .frame(height: 70).border(.secondary)
+            Text("Выученные слова (3× ручной правки → сюда; можно дописать):")
+            TextEditor(text: $model.learnedText).font(.system(.body, design: .monospaced))
+                .frame(height: 70).border(.secondary)
+            Text("Чёрный список приложений (bundle id):")
             TextEditor(text: $model.blacklistText).font(.system(.body, design: .monospaced))
-                .frame(height: 60).border(.secondary)
+                .frame(height: 50).border(.secondary)
             HStack {
                 Button("Применить") { model.commitLexicons() }
                 Button("Импорт текста…") { model.importCorpus() }
-                Button("Экспорт данных…") { model.exportData() }
+                Button("Экспорт…") { model.exportData() }
             }
         }
     }
@@ -178,6 +184,8 @@ struct SettingsView: View {
         VStack(alignment: .leading) {
             Toggle("Раскрывать сниппеты (FR-26)", isOn: $model.settings.expandSnippets)
             Toggle("Исправлять 2 заглавные на границе слова", isOn: $model.settings.autoFixCapitals)
+            Stepper("Учить слово после N ручных правок: \(model.settings.learnAfterManualFixes) (0=выкл)",
+                    value: $model.settings.learnAfterManualFixes, in: 0...10)
             Text("Сниппеты — по строке «ключ = раскрытие»:")
             TextEditor(text: $model.snippetsText).font(.system(.body, design: .monospaced))
                 .frame(height: 150).border(.secondary)
