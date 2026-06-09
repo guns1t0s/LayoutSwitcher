@@ -25,6 +25,8 @@ enum SelfTest {
         check("ntrcn", expectConvert: true, expect: "текст")
         check("api", expectConvert: false)
         check("пшерги", expectConvert: true, expect: "github")
+        check("dhjlt", expectConvert: true, expect: "вроде")       // common word now in dict
+        check("ybxtuj", expectConvert: true, expect: "ничего")
         check("j,hfnyj", expectConvert: true, expect: "обратно")   // comma(б) kept in word
         check("ghbdtn.", expectConvert: true, expect: "привет.")   // trailing period preserved
 
