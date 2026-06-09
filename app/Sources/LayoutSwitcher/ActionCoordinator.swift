@@ -39,6 +39,8 @@ final class ActionCoordinator: InputCaptureDelegate {
     var onChange: (() -> Void)?
     /// Called when a real layout switch was applied — drives toast/flash (FR-2/E5.5).
     var onConversionApplied: ((Layout) -> Void)?
+    /// Called when a word was learned into the dictionary (3× manual fix).
+    var onWordLearned: ((String) -> Void)?
 
     init(store: Store, dictionaries: Dictionaries, layout: LayoutController, context: ContextProvider) {
         self.store = store
@@ -57,6 +59,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         engine.exceptions = store.data.exceptions
         engine.whitelistLatin = store.data.whitelistLatin
         engine.learnedReverts = store.revertedWords()
+        engine.learnedWords = store.data.learnedWords
     }
 
     // MARK: - InputCaptureDelegate
@@ -234,6 +237,11 @@ final class ActionCoordinator: InputCaptureDelegate {
         lastCompleted = LastWord(text: converted, boundary: boundary)
         lastConversion = LastConversion(original: text, converted: converted,
                                         boundary: boundary, layoutBefore: from)
+        // Learn from repeated manual fixes: after N, the word joins the dictionary.
+        if !converted.contains(" "), store.recordManualFix(converted) {
+            engine.learnedWords = store.data.learnedWords
+            onWordLearned?(converted)
+        }
         onChange?()
     }
 

@@ -61,6 +61,7 @@ public final class DetectionEngine: @unchecked Sendable {
     public var exceptions: Set<String> = []        // never convert
     public var whitelistLatin: Set<String> = []    // always latin
     public var learnedReverts: Set<String> = []    // manually reverted → stop converting
+    public var learnedWords: Set<String> = []      // learned from manual fixes → treat as dictionary words
 
     public init(dictionaries: Dictionaries, config: Config = Config()) {
         self.dicts = dictionaries
@@ -115,8 +116,8 @@ public final class DetectionEngine: @unchecked Sendable {
 
         let curModel = dicts.model(for: current)
         let altModel = dicts.model(for: target)
-        let curIsWord = curModel.contains(lc)
-        let altIsWord = altModel.contains(altLC)
+        let curIsWord = curModel.contains(lc) || learnedWords.contains(lc)
+        let altIsWord = altModel.contains(altLC) || learnedWords.contains(altLC)
 
         // --- Dictionary decisions (high confidence) -----------------------------
         if curIsWord && !altIsWord {

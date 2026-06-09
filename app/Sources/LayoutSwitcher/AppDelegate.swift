@@ -41,6 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.overlay.notifySwitch(to: layout, settings: self.store.settings)
         }
+        coordinator.onWordLearned = { [weak self] word in
+            self?.overlay.notifyLearned(word)
+        }
 
         hotkeys.register(.init(
             toggle: { [weak self] in self?.coordinator.toggleAuto() },
