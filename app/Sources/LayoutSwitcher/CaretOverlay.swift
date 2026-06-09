@@ -34,7 +34,16 @@ final class OverlayController {
     func notifySwitch(to layout: Layout, settings: Settings) {
         if settings.flashOnConvert { flashBadge() }
         guard settings.showSwitchToast else { return }
-        toastLabel.stringValue = "▸ \(layout.short)"
+        showToast("▸ \(layout.short)", seconds: 0.8)
+    }
+
+    /// A word was added to the dictionary (3× manual fix) — confirm it briefly.
+    func notifyLearned(_ word: String) {
+        showToast("✓ \(word) → словарь", seconds: 1.3)
+    }
+
+    private func showToast(_ text: String, seconds: TimeInterval) {
+        toastLabel.stringValue = text
         toastLabel.textColor = .labelColor
         sizeToFit(toast, label: toastLabel)
         let size = toast.frame.size
@@ -49,7 +58,7 @@ final class OverlayController {
         toastWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.fadeOut(self?.toast) }
         toastWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
     func hide() { badge.orderOut(nil); toast.orderOut(nil) }

@@ -69,6 +69,30 @@ public final class Store: @unchecked Sendable {
         data.layoutMemory["\(bundleID)|\(role)"]
     }
 
+    // MARK: learn words from repeated manual fixes
+
+    /// Tally a manually-fixed word; once it crosses `learnAfterManualFixes`,
+    /// promote it into the dictionary. Returns true the moment it's learned.
+    public func recordManualFix(_ word: String) -> Bool {
+        let n = settings.learnAfterManualFixes
+        guard n > 0 else { return false }
+        let w = word.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard w.count >= 2, w.contains(where: { $0.isLetter }) else { return false }
+        if data.learnedWords.contains(w) { return false }
+        var learnedNow = false
+        updateData { d in
+            let c = (d.learnedWordCounts[w] ?? 0) + 1
+            if c >= n {
+                d.learnedWords.insert(w)
+                d.learnedWordCounts[w] = nil
+                learnedNow = true
+            } else {
+                d.learnedWordCounts[w] = c
+            }
+        }
+        return learnedNow
+    }
+
     // MARK: learned reverts (FR-18)
 
     public func recordRevert(_ word: String) {

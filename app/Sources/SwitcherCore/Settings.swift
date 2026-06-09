@@ -44,6 +44,10 @@ public struct Settings: Codable, Sendable, Equatable {
     public var autoFixCapitals: Bool = false         // FR-25 on word boundary
     public var expandSnippets: Bool = true           // FR-26
 
+    /// Learn a word into the dictionary after this many manual fixes of it
+    /// (double-⇧). 0 = off. Lets the lexicon grow from real corrections.
+    public var learnAfterManualFixes: Int = 3
+
     // Fullscreen auto-disable (FR-31)
     public var disableInFullscreen: Bool = true
 
@@ -80,5 +84,7 @@ public struct UserData: Codable, Sendable, Equatable {
     public var learnedReverts: [String: Int] = [:]   // word → revert count
     public var layoutMemory: [String: Layout] = [:]  // "bundleID|role" → layout
     public var snippets: [String: String] = [:]      // abbrev → expansion (FR-26)
+    public var learnedWords: Set<String> = []        // promoted to the dictionary
+    public var learnedWordCounts: [String: Int] = [:] // manual-fix tally toward promotion
     public init() {}
 }
