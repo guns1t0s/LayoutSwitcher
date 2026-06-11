@@ -101,4 +101,21 @@ final class DetectionEngineTests: XCTestCase {
         XCTAssertTrue(d.shouldConvert)
         XCTAssertEqual(d.converted, "привет.")
     }
+
+    // Trailing "[" is the letter х when the dictionary says so: "vbhjds[" → "мировых".
+    func testTrailingSoftPunctAsLetterViaDictionary() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        let d = e.evaluate("vbhjds[")
+        XCTAssertTrue(d.shouldConvert)
+        XCTAssertEqual(d.converted, "мировых")
+        XCTAssertEqual(d.reason, .altIsWord)
+    }
+
+    // Trailing "." resolves to ю when that makes a dictionary word: "ltkf." → "делаю".
+    func testTrailingPeriodAsYuViaDictionary() {
+        let e = DetectionEngine(dictionaries: .from(ruWords: ["делаю"], enWords: []))
+        let d = e.evaluate("ltkf.")
+        XCTAssertTrue(d.shouldConvert)
+        XCTAssertEqual(d.converted, "делаю")
+    }
 }
