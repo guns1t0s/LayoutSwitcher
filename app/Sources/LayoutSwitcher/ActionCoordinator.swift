@@ -28,12 +28,20 @@ final class ActionCoordinator: InputCaptureDelegate {
     private var fullscreenActive = false
     private var generation = 0
 
-    // Diagnostics (no typed text retained — just counts + last reason).
+    // Diagnostics (in-memory only; shown on demand in the Diagnostics panel).
     private(set) var boundariesSeen = 0
     private(set) var conversionsApplied = 0
     private(set) var lastReason = "—"
+    /// Last N boundary decisions incl. noops/guard-skips — pinpoints WHY a word
+    /// wasn't converted. Ephemeral ring, never persisted.
+    private(set) var recentDecisions: [String] = []
     var isSuppressing: Bool { suppressActive }
     var isFullscreen: Bool { fullscreenActive }
+
+    private func logDecision(_ entry: String) {
+        recentDecisions.insert(entry, at: 0)
+        if recentDecisions.count > 12 { recentDecisions.removeLast() }
+    }
 
     /// Called after any state change so the menu bar / overlay can refresh.
     var onChange: (() -> Void)?
@@ -64,10 +72,16 @@ final class ActionCoordinator: InputCaptureDelegate {
 
     // MARK: - InputCaptureDelegate
 
+    /// Bumped by anything that invalidates a scheduled text replacement
+    /// (backspace, navigation, click, another boundary). Plain typed characters
+    /// do NOT bump it — a late replacement can absorb them (see onBoundary).
+    private var interruptions = 0
+
     func inputDidKeyDown(keycode: Int64, chars: String, flags: CGEventFlags) {
         generation &+= 1
         switch keycode {
         case 51:                                   // Backspace
+            interruptions &+= 1
             if !buffer.backspace() { resetWordState() }
             return
         case 117, 53, 71, 115, 116, 119, 121, 123, 124, 125, 126:  // fwd-del/esc/clear/nav
@@ -124,36 +138,64 @@ final class ActionCoordinator: InputCaptureDelegate {
             }
         }
 
-        guard store.settings.autoConvertEnabled, !suppressActive, !fullscreenActive else {
-            updateContext(with: word); return
+        guard store.settings.autoConvertEnabled else {
+            logDecision("\(word) [off]"); updateContext(with: word); return
         }
-        if context.isSecureInput { updateContext(with: word); return }            // SEC-4
+        guard !suppressActive else {
+            logDecision("\(word) [fn-suppress]"); updateContext(with: word); return
+        }
+        guard !fullscreenActive else {
+            logDecision("\(word) [fullscreen]"); updateContext(with: word); return
+        }
+        if context.isSecureInput {                                                // SEC-4
+            logDecision("\(word) [secure]"); updateContext(with: word); return
+        }
         if let bid = context.frontmostBundleID, store.settings.appBlacklist.contains(bid) {
-            updateContext(with: word); return                                     // FR-32
+            logDecision("\(word) [blacklist]"); updateContext(with: word); return // FR-32
         }
 
         let typed = layout.currentLayout()
         let decision = engine.evaluate(word, typedLayout: typed, context: lastContextLayout)
         lastReason = decision.reason.rawValue
-        guard decision.shouldConvert else { updateContext(with: word); return }
+        guard decision.shouldConvert else {
+            logDecision("\(word) [\(decision.reason.rawValue)]")
+            updateContext(with: word); return
+        }
 
         if store.settings.shadowMode {                                            // FR-20
+            logDecision("\(word) → \(decision.converted) [shadow]")
             record(decision, applied: false)
             updateContext(with: word)
             return
         }
 
-        let deleteCount = word.count + (boundary != nil ? 1 : 0)
-        let insertText = decision.converted + (boundary.map(String.init) ?? "")
-        let snapshot = generation
+        // Boundary interrupts an earlier pending replacement of the previous word.
+        interruptions &+= 1
+        let snapshot = interruptions
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.generation == snapshot else { return }           // REL-5 race guard
+            guard let self else { return }
+            // A backspace/click/another boundary arrived first → applying the
+            // stale replacement would corrupt; skip (fail-open).
+            guard self.interruptions == snapshot else {
+                self.logDecision("\(word) [raced]"); return
+            }
+            // Plain characters typed after the boundary (start of the next word)
+            // are absorbed: they were typed in the same wrong layout, so delete
+            // them too and re-insert converted. This replaces the old "cancel on
+            // any keystroke" guard that silently dropped conversions during
+            // fluent typing.
+            let extras = self.buffer.word
+            let convertedExtras = extras.isEmpty ? "" : KeyMap.convert(extras, to: decision.to)
+            let deleteCount = word.count + (boundary != nil ? 1 : 0) + extras.count
+            let insertText = decision.converted + (boundary.map(String.init) ?? "") + convertedExtras
             self.layout.replace(deleteCount: deleteCount, with: insertText)
             self.layout.select(decision.to)
+            if !extras.isEmpty { self.buffer.replaceWord(convertedExtras) }
             self.feedback()
             self.onConversionApplied?(decision.to)
         }
         conversionsApplied += 1
+        logDecision("\(word) → \(decision.converted) [\(decision.reason.rawValue)]")
         lastConversion = LastConversion(original: word, converted: decision.converted,
                                         boundary: boundary, layoutBefore: decision.from)
         lastContextLayout = decision.to
@@ -388,6 +430,7 @@ final class ActionCoordinator: InputCaptureDelegate {
     }
 
     private func resetWordState() {
+        interruptions &+= 1       // invalidate any scheduled replacement
         buffer.reset()
         lastCompleted = nil
         lastConversion = nil

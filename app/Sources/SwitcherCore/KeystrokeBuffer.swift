@@ -64,5 +64,9 @@ public final class KeystrokeBuffer {
     /// Navigation / click / focus change / any non-typing edit: drop state.
     public func reset() { word = "" }
 
+    /// Replace the in-progress word (used when a late conversion also rewrote
+    /// the first characters of the next word on screen).
+    public func replaceWord(_ s: String) { word = s }
+
     public var isEmpty: Bool { word.isEmpty }
 }
