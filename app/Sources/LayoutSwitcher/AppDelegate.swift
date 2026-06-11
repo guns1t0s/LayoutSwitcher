@@ -99,6 +99,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Front app: \(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?")
         Secure input now: \(context.isSecureInput)
         Blacklisted apps: \(s.appBlacklist.count)
+        Dict: ru \(coordinator.engine.learnedWords.count) learned
+        Recent decisions (new→old):
+        \(coordinator.recentDecisions.isEmpty ? "  —" : coordinator.recentDecisions.map { "  " + $0 }.joined(separator: "\n"))
         """
     }
 

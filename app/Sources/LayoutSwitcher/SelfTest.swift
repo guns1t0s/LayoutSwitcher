@@ -30,6 +30,9 @@ enum SelfTest {
         check("Cajhvekbheq", expectConvert: true, expect: "Сформулируй")  // imperative form
         check("dt;kbdjt", expectConvert: true, expect: "вежливое")        // ж(;) inside word
         check("j,hfnyj", expectConvert: true, expect: "обратно")   // comma(б) kept in word
+        check("vbhjds[", expectConvert: true, expect: "мировых")   // trailing х([) as letter
+        check("gjybvfybz", expectConvert: true, expect: "понимания")
+        check("njkmrj", expectConvert: true, expect: "только")
         check("ghbdtn.", expectConvert: true, expect: "привет.")   // trailing period preserved
 
         func eq(_ label: String, _ got: String, _ want: String) {

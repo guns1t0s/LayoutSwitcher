@@ -116,6 +116,22 @@ public final class DetectionEngine: @unchecked Sendable {
 
         let curModel = dicts.model(for: current)
         let altModel = dicts.model(for: target)
+
+        // --- Outer soft-punct as LETTERS (dictionary-driven) ---------------------
+        // Russian words commonly END in б ж х ъ э ё ю — on the EN layout those
+        // are , ; [ ] ' ` . and get trimmed into `core` as "punctuation", so
+        // "vbhjds[" lost its х and never matched "мировых". If converting the
+        // FULL token (outer punct included as letters) yields a dictionary word,
+        // prefer that reading; "ghbdtn." still falls through ("приветю" is no
+        // word) and keeps its real period.
+        if token != core {
+            let fullAlt = KeyMap.convert(token, to: target)
+            if altModel.contains(fullAlt.lowercased()) && !curModel.contains(lc) {
+                return Decision(shouldConvert: true, from: current, to: target,
+                                original: token, converted: fullAlt,
+                                confidence: 1.0, reason: .altIsWord)
+            }
+        }
         let curIsWord = curModel.contains(lc) || learnedWords.contains(lc)
         let altIsWord = altModel.contains(altLC) || learnedWords.contains(altLC)
 
