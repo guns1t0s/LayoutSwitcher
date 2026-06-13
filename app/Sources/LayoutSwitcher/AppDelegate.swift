@@ -37,9 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.menuBar.refreshTitle()
             self.overlay.refresh(layout: self.coordinator.currentLayout(), settings: self.store.settings)
         }
-        coordinator.onConversionApplied = { [weak self] layout in
+        coordinator.onConversionApplied = { [weak self] layout, converted in
             guard let self else { return }
-            self.overlay.notifySwitch(to: layout, settings: self.store.settings)
+            let undoKey = HotkeyManager.describe(.undoConversion, custom: self.store.settings.hotkeys)
+            self.overlay.notifySwitch(to: layout, converted: converted, undoKey: undoKey,
+                                      settings: self.store.settings)
         }
         coordinator.onWordLearned = { [weak self] word in
             self?.overlay.notifyLearned(word)
