@@ -125,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Secure input now: \(context.isSecureInput)
         Blacklisted apps: \(s.appBlacklist.count)
         Dict: ru \(coordinator.engine.learnedWords.count) learned
+        Outcomes: \(coordinator.reasonCounts.sorted { $0.value > $1.value }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
         Recent decisions (new→old):
         \(coordinator.recentDecisions.isEmpty ? "  —" : coordinator.recentDecisions.map { "  " + $0 }.joined(separator: "\n"))
         """
