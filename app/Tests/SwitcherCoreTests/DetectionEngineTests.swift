@@ -75,6 +75,14 @@ final class DetectionEngineTests: XCTestCase {
         XCTAssertFalse(e.evaluate("123").shouldConvert)
     }
 
+    // Mixed RU+EN token (mid-word layout switch) must never be touched.
+    func testMixedScriptLeftAlone() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        let d = e.evaluate("abвгд")
+        XCTAssertFalse(d.shouldConvert)
+        XCTAssertEqual(d.reason, .mixedScript)
+    }
+
     func testLearnedWordTreatedAsDictionary() {
         let e = engine(ru: [], en: [])
         XCTAssertFalse(e.evaluate("dhjlt").shouldConvert)   // unknown → leave it

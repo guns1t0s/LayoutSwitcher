@@ -53,6 +53,21 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(s.recordManualFix("вроде"))    // already learned, no re-trigger
     }
 
+    func testManualFixTallyNotPersisted() {
+        let dir = tempDir()
+        let s = Store(directory: dir)            // threshold 3
+        _ = s.recordManualFix("секрет")           // 1 — in memory only
+        _ = s.recordManualFix("секрет")           // 2
+        XCTAssertTrue(s.data.learnedWords.isEmpty)
+        let url = dir.appendingPathComponent("userdata.json")
+        if let raw = try? String(contentsOf: url, encoding: .utf8) {
+            XCTAssertFalse(raw.contains("секрет"), "raw typed word leaked to disk (SEC-2)")
+            XCTAssertFalse(raw.contains("learnedWordCounts"))
+        }
+        XCTAssertTrue(s.recordManualFix("секрет")) // 3 → promote
+        XCTAssertTrue(Store(directory: dir).data.learnedWords.contains("секрет"))
+    }
+
     func testLearnDisabledWhenThresholdZero() {
         let s = Store(directory: tempDir())
         s.updateSettings { $0.learnAfterManualFixes = 0 }

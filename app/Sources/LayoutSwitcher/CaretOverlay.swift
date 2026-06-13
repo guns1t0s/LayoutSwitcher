@@ -30,11 +30,12 @@ final class OverlayController {
         badge.orderFrontRegardless()
     }
 
-    /// Switch happened → toast (FR-2) and/or flash (E5.5).
-    func notifySwitch(to layout: Layout, settings: Settings) {
+    /// Switch happened → toast with undo affordance (FR-2/FR-15) and/or flash (E5.5).
+    func notifySwitch(to layout: Layout, converted: String?, undoKey: String, settings: Settings) {
         if settings.flashOnConvert { flashBadge() }
         guard settings.showSwitchToast else { return }
-        showToast("▸ \(layout.short)", seconds: 0.8)
+        let head = converted ?? "▸ \(layout.short)"
+        showToast("\(head)   ↶ \(undoKey)", seconds: 1.6)
     }
 
     /// A word was added to the dictionary (3× manual fix) — confirm it briefly.
