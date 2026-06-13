@@ -19,35 +19,47 @@ final class InputCapture {
 
     weak var delegate: InputCaptureDelegate?
 
+    /// Health of the capture, surfaced to the UI (REL-7, scenario 10.6).
+    enum Health: Equatable { case active, disabled, noPermission, noTap }
+    /// Notified ONLY when health changes.
+    var onHealthChange: ((Health) -> Void)?
+
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var watchdog: Timer?
+    private var healthTimer: DispatchSourceTimer?
+    private let healthQueue = DispatchQueue(label: "com.oateplov.layoutswitcher.health")
+    private var lastHealth: Health?
 
     /// Diagnostics: is the tap currently enabled, and how many key events seen.
     var isActive: Bool { tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false }
     private(set) var eventsSeen = 0
+    private(set) var tapRearms = 0          // times re-enabled
+    private(set) var tapRecreations = 0     // times fully rebuilt (dead port)
 
     // double-shift gesture state
     private var prevFlags = CGEventFlags()
     private var lastShiftPress: TimeInterval = 0
     private var otherKeySinceShift = false
 
+    /// Create the tap if permissions allow. Idempotent. Starts the watchdog.
+    @discardableResult
     func start() -> Bool {
-        if let tap, CGEvent.tapIsEnabled(tap: tap) { return true }   // idempotent
+        if tap == nil { _ = createTap() }
+        startWatchdog()
+        return isActive
+    }
+
+    private func createTap() -> Bool {
+        if let tap, CGEvent.tapIsEnabled(tap: tap) { return true }
         let mask: CGEventMask =
             (1 << CGEventType.keyDown.rawValue) |
             (1 << CGEventType.flagsChanged.rawValue) |
             (1 << CGEventType.leftMouseDown.rawValue) |
             (1 << CGEventType.rightMouseDown.rawValue)
-
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: InputCapture.callback,
-            userInfo: refcon
+            tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+            eventsOfInterest: mask, callback: InputCapture.callback, userInfo: refcon
         ) else {
             return false   // no Input Monitoring / Accessibility permission yet
         }
@@ -56,26 +68,79 @@ final class InputCapture {
         self.runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        startWatchdog()
         return true
     }
 
-    func stop() {
-        watchdog?.invalidate(); watchdog = nil
+    private func teardownTap() {
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
         if let runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes) }
+        runLoopSource = nil
+        tap = nil
     }
 
-    /// REL-1: re-enable proactively in case a disabled event was missed.
-    func rearmIfNeeded() {
-        guard let tap else { return }
-        if !CGEvent.tapIsEnabled(tap: tap) { CGEvent.tapEnable(tap: tap, enable: true) }
+    /// Dead port (revoked + regranted, or killed under load): rebuild from scratch.
+    private func recreateTap() {
+        teardownTap()
+        tapRecreations += 1
+        _ = createTap()
     }
+
+    func stop() {
+        healthTimer?.cancel(); healthTimer = nil
+        teardownTap()
+    }
+
+    /// Triggered by sleep/wake too — force an immediate health check.
+    func rearmIfNeeded() { healthQueue.async { [weak self] in self?.healthCheck() } }
+
+    // MARK: - self-healing watchdog (REL-1/REL-7)
 
     private func startWatchdog() {
-        watchdog = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.rearmIfNeeded()
+        guard healthTimer == nil else { return }
+        // DispatchSourceTimer (not a runloop Timer) so it keeps firing during
+        // tracking loops/modals; generous interval + leeway respects NFR-6.
+        let t = DispatchSource.makeTimerSource(queue: healthQueue)
+        t.schedule(deadline: .now() + 5, repeating: 5, leeway: .seconds(2))
+        t.setEventHandler { [weak self] in self?.healthCheck() }
+        healthTimer = t
+        t.resume()
+    }
+
+    /// Runs on the health queue; all tap mutation hops to main (the runloop owner).
+    private func healthCheck() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // A keyboard tap needs BOTH Accessibility and Input Monitoring; either
+            // can be revoked at runtime, leaving the app silently deaf (REL-7/10.6).
+            guard Permissions.isAccessibilityTrusted, Permissions.isInputMonitoringGranted else {
+                self.teardownTap()
+                self.setHealth(.noPermission)
+                return
+            }
+            guard let tap = self.tap else {
+                // Permissions returned after a revocation → rebuild.
+                self.setHealth(self.createTap() ? .active : .noTap)
+                return
+            }
+            if CGEvent.tapIsEnabled(tap: tap) {
+                self.setHealth(.active)
+            } else {
+                CGEvent.tapEnable(tap: tap, enable: true)
+                self.tapRearms += 1
+                if CGEvent.tapIsEnabled(tap: tap) {
+                    self.setHealth(.active)
+                } else {
+                    self.recreateTap()                       // re-enable failed → dead port
+                    self.setHealth(self.isActive ? .active : .noTap)
+                }
+            }
         }
+    }
+
+    private func setHealth(_ h: Health) {
+        guard h != lastHealth else { return }
+        lastHealth = h
+        onHealthChange?(h)
     }
 
     // MARK: - C callback (hot path — keep tiny, never block)

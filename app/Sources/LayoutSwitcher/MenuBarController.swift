@@ -23,6 +23,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private var hasIcon = false
+    private var healthy = true
+
+    /// Reflect capture health (REL-7/10.6): dim the glyph when input isn't being
+    /// captured so "silently stopped" becomes visible at a glance.
+    func setHealth(_ health: InputCapture.Health) {
+        healthy = (health == .active)
+        statusItem.button?.appearsDisabled = !healthy
+        refreshTitle()
+    }
 
     /// Monochrome template glyph (system recolours it for light/dark menu bars).
     /// `NSImage(named:)` picks up the @2x variant; the "Template" name sets
@@ -67,6 +76,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let s = coordinator.store.settings
+
+        if !healthy {
+            menu.addItem(withTitle: "⚠ Перехват неактивен — выдать разрешения",
+                         action: #selector(openSecuritySettings), keyEquivalent: "").target = self
+            menu.addItem(.separator())
+        }
 
         let layout = coordinator.currentLayout()?.short ?? "—"
         menu.addItem(withTitle: "Раскладка: \(layout)", action: nil, keyEquivalent: "")
@@ -151,6 +166,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func convertLine() { coordinator.convertCurrentLine() }
     @objc private func toggleShadow() { coordinator.setShadowMode(!coordinator.store.settings.shadowMode) }
     @objc private func openSettings() { settingsWC.show() }
+    @objc private func openSecuritySettings() { Permissions.openInputMonitoringSettings() }
     @objc private func showDiagnostics() {
         let a = NSAlert()
         a.messageText = "Диагностика"
