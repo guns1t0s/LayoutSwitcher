@@ -35,10 +35,15 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// Last N boundary decisions incl. noops/guard-skips — pinpoints WHY a word
     /// wasn't converted. Ephemeral ring, never persisted.
     private(set) var recentDecisions: [String] = []
+    /// REL-9 in-session metrics: how often each outcome fired (reason → count).
+    private(set) var reasonCounts: [String: Int] = [:]
     var isSuppressing: Bool { suppressActive }
     var isFullscreen: Bool { fullscreenActive }
 
-    private func logDecision(_ entry: String) {
+    /// Record one boundary outcome: tally the reason and append to the ring.
+    private func note(_ word: String, _ reason: String, converted: String? = nil) {
+        reasonCounts[reason, default: 0] += 1
+        let entry = converted.map { "\(word) → \($0) [\(reason)]" } ?? "\(word) [\(reason)]"
         recentDecisions.insert(entry, at: 0)
         if recentDecisions.count > 12 { recentDecisions.removeLast() }
     }
@@ -140,31 +145,31 @@ final class ActionCoordinator: InputCaptureDelegate {
         }
 
         guard store.settings.autoConvertEnabled else {
-            logDecision("\(word) [off]"); updateContext(with: word); return
+            note(word, "off"); updateContext(with: word); return
         }
         guard !suppressActive else {
-            logDecision("\(word) [fn-suppress]"); updateContext(with: word); return
+            note(word, "fn-suppress"); updateContext(with: word); return
         }
         guard !fullscreenActive else {
-            logDecision("\(word) [fullscreen]"); updateContext(with: word); return
+            note(word, "fullscreen"); updateContext(with: word); return
         }
         if context.isSecureInput {                                                // SEC-4
-            logDecision("\(word) [secure]"); updateContext(with: word); return
+            note(word, "secure"); updateContext(with: word); return
         }
         if let bid = context.frontmostBundleID, store.settings.appBlacklist.contains(bid) {
-            logDecision("\(word) [blacklist]"); updateContext(with: word); return // FR-32
+            note(word, "blacklist"); updateContext(with: word); return            // FR-32
         }
 
         let typed = layout.currentLayout()
         let decision = engine.evaluate(word, typedLayout: typed, context: lastContextLayout)
         lastReason = decision.reason.rawValue
         guard decision.shouldConvert else {
-            logDecision("\(word) [\(decision.reason.rawValue)]")
+            note(word, decision.reason.rawValue)
             updateContext(with: word); return
         }
 
         if store.settings.shadowMode {                                            // FR-20
-            logDecision("\(word) → \(decision.converted) [shadow]")
+            note(word, "shadow", converted: decision.converted)
             record(decision, applied: false)
             updateContext(with: word)
             return
@@ -178,7 +183,7 @@ final class ActionCoordinator: InputCaptureDelegate {
             // A backspace/click/another boundary arrived first → applying the
             // stale replacement would corrupt; skip (fail-open).
             guard self.interruptions == snapshot else {
-                self.logDecision("\(word) [raced]"); return
+                self.note(word, "raced"); return
             }
             // Plain characters typed after the boundary (start of the next word)
             // are absorbed: they were typed in the same wrong layout, so delete
@@ -196,7 +201,7 @@ final class ActionCoordinator: InputCaptureDelegate {
             self.onConversionApplied?(decision.to, decision.converted)
         }
         conversionsApplied += 1
-        logDecision("\(word) → \(decision.converted) [\(decision.reason.rawValue)]")
+        note(word, decision.reason.rawValue, converted: decision.converted)
         lastConversion = LastConversion(original: word, converted: decision.converted,
                                         boundary: boundary, layoutBefore: decision.from)
         lastContextLayout = decision.to
