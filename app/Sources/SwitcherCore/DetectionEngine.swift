@@ -13,6 +13,7 @@ public enum DetectionReason: String, Sendable {
     case whitelistedLatin        // forced to latin by whitelist
     case suppressed              // hold-to-suppress / global toggle off
     case mixedScript             // token mixes RU+EN letters (mid-word switch) — leave it
+    case ambiguousResolved       // valid both ways, resolved by frequency + context
 }
 
 public struct Decision: Sendable, Equatable {
@@ -160,11 +161,16 @@ public final class DetectionEngine: @unchecked Sendable {
                             confidence: 1.0, reason: .altIsWord)
         }
         if curIsWord && altIsWord {
-            // Valid both ways (e.g. "ctj" vs "сей"): default to leaving it.
-            if config.convertAmbiguous, let ctx = context, ctx == target {
+            // Valid both ways. Default: LEAVE IT (zero-corruption). Convert only
+            // with strong, conservative evidence: the surrounding text is already
+            // in the target layout AND the alt reading is a common word (so we
+            // don't flip toward a rare/odd reading). Never convert on no context
+            // — that would be a coin-flip on the very text we must not corrupt.
+            let altCommon = dicts.freqRank(altLC, target).map { $0 <= 3000 } ?? false
+            if context == target && (altCommon || config.convertAmbiguous) {
                 return Decision(shouldConvert: true, from: current, to: target,
                                 original: token, converted: fullConverted,
-                                confidence: 0.6, reason: .ngramMargin)
+                                confidence: 0.7, reason: .ambiguousResolved)
             }
             return .noop(token, layout: current, reason: .ambiguousBothValid)
         }

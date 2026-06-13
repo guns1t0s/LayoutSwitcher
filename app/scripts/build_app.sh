@@ -22,6 +22,11 @@ cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 # Avoids nesting an unsignable SwiftPM .bundle inside the app.
 cp "$ROOT/Sources/SwitcherCore/Resources/ru_words.txt" "$APP/Contents/Resources/"
 cp "$ROOT/Sources/SwitcherCore/Resources/en_words.txt" "$APP/Contents/Resources/"
+# Frequency-ordered lists (optional) — used for the ambiguous-word tiebreak.
+for f in ru_freq en_freq; do
+    [ -f "$ROOT/Sources/SwitcherCore/Resources/$f.txt" ] && \
+        cp "$ROOT/Sources/SwitcherCore/Resources/$f.txt" "$APP/Contents/Resources/"
+done
 
 # App icon: build AppIcon.icns from Resources/icon/AppIcon.png (optional).
 APPICON="$ROOT/Resources/icon/AppIcon.png"
