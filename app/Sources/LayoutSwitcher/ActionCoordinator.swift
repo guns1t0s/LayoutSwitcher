@@ -26,7 +26,14 @@ final class ActionCoordinator: InputCaptureDelegate {
 
     private var suppressActive = false
     private var fullscreenActive = false
-    private var generation = 0
+    // Two invalidation epochs with DIFFERENT policies (intentionally separate):
+    //  • keystrokeEpoch — bumped on EVERY keyDown. A snippet/autofix replacement
+    //    aborts if the user typed anything after it (its expansion is fixed, not
+    //    layout-derived, so it can't absorb extra characters).
+    //  • disruptionEpoch — bumped only on DISRUPTIVE events (backspace, nav,
+    //    click, another boundary). An auto-conversion absorbs plain typing that
+    //    followed it (same wrong layout) but aborts on disruption.
+    private var keystrokeEpoch = 0
 
     // Diagnostics (in-memory only; shown on demand in the Diagnostics panel).
     private(set) var boundariesSeen = 0
@@ -81,13 +88,13 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// Bumped by anything that invalidates a scheduled text replacement
     /// (backspace, navigation, click, another boundary). Plain typed characters
     /// do NOT bump it — a late replacement can absorb them (see onBoundary).
-    private var interruptions = 0
+    private var disruptionEpoch = 0
 
     func inputDidKeyDown(keycode: Int64, chars: String, flags: CGEventFlags) {
-        generation &+= 1
+        keystrokeEpoch &+= 1
         switch keycode {
         case 51:                                   // Backspace
-            interruptions &+= 1
+            disruptionEpoch &+= 1
             if !buffer.backspace() { resetWordState() }
             return
         case 117, 53, 71, 115, 116, 119, 121, 123, 124, 125, 126:  // fwd-del/esc/clear/nav
@@ -176,27 +183,23 @@ final class ActionCoordinator: InputCaptureDelegate {
         }
 
         // Boundary interrupts an earlier pending replacement of the previous word.
-        interruptions &+= 1
-        let snapshot = interruptions
+        disruptionEpoch &+= 1
+        let snapshot = disruptionEpoch
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             // A backspace/click/another boundary arrived first → applying the
             // stale replacement would corrupt; skip (fail-open).
-            guard self.interruptions == snapshot else {
+            guard self.disruptionEpoch == snapshot else {
                 self.note(word, "raced"); return
             }
-            // Plain characters typed after the boundary (start of the next word)
-            // are absorbed: they were typed in the same wrong layout, so delete
-            // them too and re-insert converted. This replaces the old "cancel on
-            // any keystroke" guard that silently dropped conversions during
-            // fluent typing.
-            let extras = self.buffer.word
-            let convertedExtras = extras.isEmpty ? "" : KeyMap.convert(extras, to: decision.to)
-            let deleteCount = word.count + (boundary != nil ? 1 : 0) + extras.count
-            let insertText = decision.converted + (boundary.map(String.init) ?? "") + convertedExtras
-            self.layout.replace(deleteCount: deleteCount, with: insertText)
+            // Absorb plain characters of the next word typed in the same wrong
+            // layout (delete + re-insert converted). Pure math lives in the planner.
+            let plan = CorrectionPlanner.autoConvert(
+                original: word, converted: decision.converted, boundary: boundary,
+                extras: self.buffer.word, extrasTo: decision.to)
+            self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             self.layout.select(decision.to)
-            if !extras.isEmpty { self.buffer.replaceWord(convertedExtras) }
+            if !plan.convertedExtras.isEmpty { self.buffer.replaceWord(plan.convertedExtras) }
             self.feedback()
             self.onConversionApplied?(decision.to, decision.converted)
         }
@@ -211,12 +214,11 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// Shared replace used by snippets / autofix (no layout switch).
     private func applyReplacement(_ original: String, with text: String,
                                   boundary: Character?, layoutAfter: Layout?) {
-        let deleteCount = original.count + (boundary != nil ? 1 : 0)
-        let insertText = text + (boundary.map(String.init) ?? "")
-        let snapshot = generation
+        let plan = CorrectionPlanner.replace(original: original, with: text, boundary: boundary)
+        let snapshot = keystrokeEpoch
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.generation == snapshot else { return }
-            self.layout.replace(deleteCount: deleteCount, with: insertText)
+            guard let self, self.keystrokeEpoch == snapshot else { return }
+            self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             if let l = layoutAfter { self.layout.select(l) }
         }
         lastCompleted = LastWord(text: text, boundary: boundary)
@@ -280,11 +282,10 @@ final class ActionCoordinator: InputCaptureDelegate {
         let from = text.dominantLayout ?? layout.currentLayout() ?? .en
         let to = from.other
         let converted = KeyMap.convert(text, to: to)
-        let deleteCount = text.count + (boundary != nil ? 1 : 0)
-        let insertText = converted + (boundary.map(String.init) ?? "")
+        let plan = CorrectionPlanner.replace(original: text, with: converted, boundary: boundary)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.layout.replace(deleteCount: deleteCount, with: insertText)
+            self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             self.layout.select(to)
             self.feedback()
             self.onConversionApplied?(to, converted)
@@ -351,11 +352,10 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// Reverse the last conversion and learn from it (FR-15 + FR-18).
     func undo() {
         guard let lc = lastConversion else { return }
-        let deleteCount = lc.converted.count + (lc.boundary != nil ? 1 : 0)
-        let insertText = lc.original + (lc.boundary.map(String.init) ?? "")
+        let plan = CorrectionPlanner.replace(original: lc.converted, with: lc.original, boundary: lc.boundary)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.layout.replace(deleteCount: deleteCount, with: insertText)
+            self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             self.layout.select(lc.layoutBefore)
         }
         store.recordRevert(lc.original)            // stop auto-converting this word
@@ -447,7 +447,7 @@ final class ActionCoordinator: InputCaptureDelegate {
     }
 
     private func resetWordState() {
-        interruptions &+= 1       // invalidate any scheduled replacement
+        disruptionEpoch &+= 1       // invalidate any scheduled replacement
         buffer.reset()
         lastCompleted = nil
         lastConversion = nil
