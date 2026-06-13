@@ -28,6 +28,25 @@ final class DetectionPolicyTests: XCTestCase {
         }
     }
 
+    func testAmbiguousResolvedByFrequencyAndContext() {
+        // "vfvf" is valid both ways (en word + "мама"). With Russian context AND
+        // "мама" being a common word, convert toward RU; with no context, leave it.
+        let d = Dictionaries.from(ruWords: ["мама"], enWords: ["vfvf"], ruFreq: ["мама"])
+        let e = DetectionEngine(dictionaries: d)        // convertAmbiguous OFF
+        XCTAssertFalse(e.evaluate("vfvf").shouldConvert)            // no context → leave
+        let r = e.evaluate("vfvf", context: .ru)
+        XCTAssertTrue(r.shouldConvert)
+        XCTAssertEqual(r.converted, "мама")
+        XCTAssertEqual(r.reason, .ambiguousResolved)
+    }
+
+    func testAmbiguousLeftWhenAltNotCommon() {
+        // Same token, but "мама" is NOT in the frequency list → no tiebreak, leave it
+        // even with Russian context (we don't flip toward an uncommon reading).
+        let d = Dictionaries.from(ruWords: ["мама"], enWords: ["vfvf"])
+        XCTAssertFalse(DetectionEngine(dictionaries: d).evaluate("vfvf", context: .ru).shouldConvert)
+    }
+
     func testContextCanTipAmbiguousWhenEnabled() {
         let cfg = DetectionEngine.Config(convertAmbiguous: true)
         let e = engine(ru: ["мама"], en: ["vfvf"], cfg)        // "vfvf" <-> "мама"
