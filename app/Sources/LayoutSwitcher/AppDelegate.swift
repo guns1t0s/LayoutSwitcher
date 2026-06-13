@@ -68,9 +68,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         focus.onFocusChange = { [weak self] in self?.coordinator.handleFocusChange() }
         focus.start()
 
+        // Health drives the menu-bar state; the watchdog re-acquires the tap on
+        // its own when permissions return, so no separate retry timer is needed.
+        input.onHealthChange = { [weak self] health in self?.handleHealth(health) }
+
         Permissions.requestAccessibility()
         Permissions.requestInputMonitoring()   // prompt + register in the IM list
-        startInputCapture()
+        input.start()
         observeSystemEvents()
         LoginItem.set(enabled: store.settings.startAtLogin)
     }
@@ -80,17 +84,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         focus.stop()
         hotkeys.unregister()
         overlay.hide()
-        permissionRetry?.invalidate()
     }
 
-    // MARK: - input capture w/ permission retry
+    // MARK: - capture health → UI (REL-7 / scenario 10.6)
+
+    private var permissionAlertShown = false
+
+    private func handleHealth(_ health: InputCapture.Health) {
+        menuBar?.setHealth(health)
+        switch health {
+        case .active:
+            NSLog("[LayoutSwitcher] capture active")
+            permissionAlertShown = false        // re-arm the alert for a future revocation
+        case .noPermission, .noTap:
+            NSLog("[LayoutSwitcher] capture inactive: \(health)")
+            if !permissionAlertShown {          // once per transition, not every tick
+                permissionAlertShown = true
+                Permissions.requestInputMonitoring()
+                Permissions.showInputMonitoringAlert()
+            }
+        case .disabled:
+            break
+        }
+    }
 
     private func diagnosticsReport() -> String {
         let s = store.settings
         return """
         Accessibility trusted: \(Permissions.isAccessibilityTrusted)
         Input Monitoring granted: \(Permissions.isInputMonitoringGranted)
-        Event tap active: \(input.isActive)
+        Event tap active: \(input.isActive)  (rearms: \(input.tapRearms), recreations: \(input.tapRecreations))
         Key events seen: \(input.eventsSeen)
         Word boundaries seen: \(coordinator.boundariesSeen)
         Conversions applied: \(coordinator.conversionsApplied)
@@ -105,31 +128,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Recent decisions (new→old):
         \(coordinator.recentDecisions.isEmpty ? "  —" : coordinator.recentDecisions.map { "  " + $0 }.joined(separator: "\n"))
         """
-    }
-
-    private func startInputCapture() {
-        // A keyboard tap created with Accessibility alone is "active" but
-        // receives NO events — Input Monitoring is the gate. Require both.
-        let ready = input.start() && Permissions.isInputMonitoringGranted
-        if ready {
-            NSLog("[LayoutSwitcher] event tap active + Input Monitoring granted")
-            permissionRetry?.invalidate(); permissionRetry = nil
-            menuBar?.refreshTitle()
-            return
-        }
-        NSLog("[LayoutSwitcher] not ready — IM granted: \(Permissions.isInputMonitoringGranted), AX: \(Permissions.isAccessibilityTrusted)")
-        Permissions.requestInputMonitoring()
-        Permissions.showInputMonitoringAlert()
-        if permissionRetry == nil {
-            permissionRetry = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-                guard let self else { return }
-                if self.input.start() && Permissions.isInputMonitoringGranted {
-                    self.permissionRetry?.invalidate(); self.permissionRetry = nil
-                    self.menuBar?.refreshTitle()
-                    NSLog("[LayoutSwitcher] Input Monitoring now granted — tap live")
-                }
-            }
-        }
     }
 
     // MARK: - supervision (REL-7)
