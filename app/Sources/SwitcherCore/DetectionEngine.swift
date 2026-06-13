@@ -12,6 +12,7 @@ public enum DetectionReason: String, Sendable {
     case excepted                // in user exceptions / learned reverts
     case whitelistedLatin        // forced to latin by whitelist
     case suppressed              // hold-to-suppress / global toggle off
+    case mixedScript             // token mixes RU+EN letters (mid-word switch) — leave it
 }
 
 public struct Decision: Sendable, Equatable {
@@ -114,6 +115,16 @@ public final class DetectionEngine: @unchecked Sendable {
             return .noop(token, layout: current, reason: .noLetters)
         }
 
+        // --- Mixed-script guard -------------------------------------------------
+        // A token with BOTH cyrillic and latin letters is a mid-word layout
+        // switch (or homoglyph). Any conversion produces mojibake and its n-gram
+        // score is meaningless → never touch it (zero-corruption principle).
+        let hasRu = core.contains { $0.isCyrillic }
+        let hasEn = core.contains { $0.isLatinLetter }
+        if hasRu && hasEn {
+            return .noop(token, layout: current, reason: .mixedScript)
+        }
+
         let curModel = dicts.model(for: current)
         let altModel = dicts.model(for: target)
 
@@ -126,7 +137,11 @@ public final class DetectionEngine: @unchecked Sendable {
         // word) and keeps its real period.
         if token != core {
             let fullAlt = KeyMap.convert(token, to: target)
-            if altModel.contains(fullAlt.lowercased()) && !curModel.contains(lc) {
+            // Guard against corrupting correct current-layout text that merely
+            // isn't in our (smaller) current dictionary: the alt reading must be
+            // a dictionary word AND genuinely more native by the n-gram margin.
+            if altModel.contains(fullAlt.lowercased()) && !curModel.contains(lc),
+               altModel.score(fullAlt.lowercased()) - curModel.score(lc) > 0 {
                 return Decision(shouldConvert: true, from: current, to: target,
                                 original: token, converted: fullAlt,
                                 confidence: 1.0, reason: .altIsWord)

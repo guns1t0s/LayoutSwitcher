@@ -19,6 +19,13 @@ public final class Store: @unchecked Sendable {
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         self.settings = Store.decode(Settings.self, from: settingsURL) ?? Settings()
         self.data = Store.decode(UserData.self, from: dataURL) ?? UserData()
+        // Migration: older builds persisted a raw manual-fix tally
+        // ("learnedWordCounts") with typed fragments. Re-save once to scrub it
+        // (the field no longer exists, so re-encoding drops it from disk).
+        if let raw = try? String(contentsOf: dataURL, encoding: .utf8),
+           raw.contains("learnedWordCounts") {
+            save(data, to: dataURL)
+        }
     }
 
     public static func defaultDirectory() -> URL {
@@ -71,26 +78,26 @@ public final class Store: @unchecked Sendable {
 
     // MARK: learn words from repeated manual fixes
 
+    /// Ephemeral manual-fix tally — IN MEMORY ONLY, never written to disk (SEC-2:
+    /// raw typed words must not be persisted). Cleared on quit.
+    private var manualFixCounts: [String: Int] = [:]
+
     /// Tally a manually-fixed word; once it crosses `learnAfterManualFixes`,
-    /// promote it into the dictionary. Returns true the moment it's learned.
+    /// promote it into the persisted dictionary. Returns true the moment it's learned.
     public func recordManualFix(_ word: String) -> Bool {
         let n = settings.learnAfterManualFixes
         guard n > 0 else { return false }
         let w = word.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard w.count >= 2, w.contains(where: { $0.isLetter }) else { return false }
         if data.learnedWords.contains(w) { return false }
-        var learnedNow = false
-        updateData { d in
-            let c = (d.learnedWordCounts[w] ?? 0) + 1
-            if c >= n {
-                d.learnedWords.insert(w)
-                d.learnedWordCounts[w] = nil
-                learnedNow = true
-            } else {
-                d.learnedWordCounts[w] = c
-            }
+        let c = (manualFixCounts[w] ?? 0) + 1
+        if c >= n {
+            manualFixCounts[w] = nil
+            updateData { $0.learnedWords.insert(w) }     // only the promoted word touches disk
+            return true
         }
-        return learnedNow
+        manualFixCounts[w] = c
+        return false
     }
 
     // MARK: learned reverts (FR-18)

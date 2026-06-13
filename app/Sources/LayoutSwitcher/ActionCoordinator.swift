@@ -46,7 +46,8 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// Called after any state change so the menu bar / overlay can refresh.
     var onChange: (() -> Void)?
     /// Called when a real layout switch was applied — drives toast/flash (FR-2/E5.5).
-    var onConversionApplied: ((Layout) -> Void)?
+    /// Second arg is the converted word (nil for selection/line), for the undo toast.
+    var onConversionApplied: ((Layout, String?) -> Void)?
     /// Called when a word was learned into the dictionary (3× manual fix).
     var onWordLearned: ((String) -> Void)?
 
@@ -192,7 +193,7 @@ final class ActionCoordinator: InputCaptureDelegate {
             self.layout.select(decision.to)
             if !extras.isEmpty { self.buffer.replaceWord(convertedExtras) }
             self.feedback()
-            self.onConversionApplied?(decision.to)
+            self.onConversionApplied?(decision.to, decision.converted)
         }
         conversionsApplied += 1
         logDecision("\(word) → \(decision.converted) [\(decision.reason.rawValue)]")
@@ -222,7 +223,16 @@ final class ActionCoordinator: InputCaptureDelegate {
 
     /// Convert the in-progress or last-finished word to the other layout, and
     /// switch the system layout. Idempotent-cycling: a second call swaps back.
+    /// SEC-4 / FR-32: never read or rewrite text in a secure field or a
+    /// blacklisted app — including manual (hotkey) paths, not just auto-convert.
+    private func mutationBlocked() -> Bool {
+        if context.isSecureInput { return true }
+        if let bid = context.frontmostBundleID, store.settings.appBlacklist.contains(bid) { return true }
+        return false
+    }
+
     func fix() {
+        guard !mutationBlocked() else { return }
         // 1) Actively typing → convert the in-progress word (fast, no clipboard).
         if !buffer.isEmpty {
             fixWord(buffer.word, boundary: nil, inProgress: true); return
@@ -246,7 +256,7 @@ final class ActionCoordinator: InputCaptureDelegate {
             return KeyMap.convert(sel, to: from.other)
         }, completion: { [weak self] handled in
             guard let self, handled, let to = target else { return }
-            self.layout.select(to); self.onConversionApplied?(to); self.onChange?()
+            self.layout.select(to); self.onConversionApplied?(to, nil); self.onChange?()
         })
     }
 
@@ -256,7 +266,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         let to = from.other
         layout.paste(KeyMap.convert(sel, to: to))
         layout.select(to)
-        onConversionApplied?(to)
+        onConversionApplied?(to, nil)
         onChange?()
     }
 
@@ -272,7 +282,7 @@ final class ActionCoordinator: InputCaptureDelegate {
             self.layout.replace(deleteCount: deleteCount, with: insertText)
             self.layout.select(to)
             self.feedback()
-            self.onConversionApplied?(to)
+            self.onConversionApplied?(to, converted)
         }
         if inProgress { buffer.reset() }
         // Enable the cycle: a second double-⇧ swaps the converted form back.
@@ -294,12 +304,13 @@ final class ActionCoordinator: InputCaptureDelegate {
         guard let cur = layout.currentLayout() else { layout.toggle(); onChange?(); return }
         let to = cur.other
         layout.select(to)
-        onConversionApplied?(to)
+        onConversionApplied?(to, nil)
         onChange?()
     }
 
     /// FR-12 line granularity / scenario 4.4: convert the whole line at the caret.
     func convertCurrentLine() {
+        guard !mutationBlocked() else { return }
         guard let (text, caret) = AXText.focusedValueAndCaret() else { return }
         let ns = text as NSString
         let loc = max(0, min(caret, ns.length))
@@ -317,7 +328,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         if AXText.setSelectedRange(location: range.location, length: range.length),
            AXText.replaceSelection(with: converted) {
             layout.select(to)
-            onConversionApplied?(to)
+            onConversionApplied?(to, nil)
             onChange?()
         }
     }
@@ -373,6 +384,7 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// Apply a transform to the current selection. AX read + paste where exposed,
     /// otherwise a clipboard copy/paste round-trip (Electron/chat apps).
     private func convertSelectionTool(_ transform: @escaping (String) -> String) {
+        guard !mutationBlocked() else { return }
         if let sel = AXText.selectedText(), !sel.isEmpty {
             layout.paste(transform(sel)); return
         }
