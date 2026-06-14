@@ -15,6 +15,7 @@ final class SettingsModel: ObservableObject {
     @Published var whitelistText: String
     @Published var snippetsText: String
     @Published var appRulesText: String
+    @Published var domainsText: String
     @Published var learnedText: String
 
     /// Set by AppDelegate to re-bind global hotkeys live (scenario 9.3).
@@ -42,6 +43,7 @@ final class SettingsModel: ObservableObject {
             ruleLines.append("\(b) off")
         }
         self.appRulesText = ruleLines.sorted().joined(separator: "\n")
+        self.domainsText = store.data.domainBlacklist.sorted().joined(separator: "\n")
         self.learnedText = store.data.learnedWords.sorted().joined(separator: "\n")
     }
 
@@ -62,6 +64,10 @@ final class SettingsModel: ObservableObject {
             $0.snippets = parseSnippets(snippetsText)
             $0.learnedWords = Set(tokens(learnedText))
             $0.appRules = parseAppRules(appRulesText)
+            $0.domainBlacklist = Set(tokens(domainsText).map {
+                $0.replacingOccurrences(of: "https://", with: "")
+                  .replacingOccurrences(of: "http://", with: "")
+            })
         }
         settings.appBlacklist = []      // migrated into appRules (authoritative now)
         coordinator?.syncFromStore()
@@ -190,7 +196,10 @@ struct SettingsView: View {
                 .frame(height: 70).border(.secondary)
             Text("Правила по приложениям: «bundleID режим [ru|en]» (режим: auto/shadow/off):")
             TextEditor(text: $model.appRulesText).font(.system(.body, design: .monospaced))
-                .frame(height: 60).border(.secondary)
+                .frame(height: 50).border(.secondary)
+            Text("Домены без автоконверта (веб-пароли/логины), host по строке:")
+            TextEditor(text: $model.domainsText).font(.system(.body, design: .monospaced))
+                .frame(height: 40).border(.secondary)
             HStack {
                 Button("Применить") { model.commitLexicons() }
                 Button("Импорт текста…") { model.importCorpus() }

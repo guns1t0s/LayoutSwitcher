@@ -92,6 +92,28 @@ enum AXText {
         return false
     }
 
+    /// Best-effort URL of the frontmost browser tab (via the AXURL attribute that
+    /// Safari/Chrome/etc. expose on the web area/window). nil for non-browsers or
+    /// when unreadable → caller fails open. Used for web-password domain stand-down.
+    static func frontmostURL() -> URL? {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return nil }
+        let app = AXUIElementCreateApplication(pid)
+        var win: AnyObject?
+        if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &win) == .success,
+           let w = win, let u = url(from: w as! AXUIElement) { return u }
+        if let el = focusedElement(), let u = url(from: el) { return u }
+        return nil
+    }
+
+    private static func url(from el: AXUIElement) -> URL? {
+        var v: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, "AXURL" as CFString, &v) == .success, let v else { return nil }
+        if let u = v as? URL { return u }
+        if let u = v as? NSURL { return u as URL }
+        if let s = v as? String { return URL(string: s) }
+        return nil
+    }
+
     // AX rects use top-left origin; Cocoa windows use bottom-left.
     private static func flipToCocoa(_ rect: CGRect) -> CGRect {
         guard let primary = NSScreen.screens.first else { return rect }
