@@ -14,7 +14,7 @@ final class SettingsModel: ObservableObject {
     @Published var exceptionsText: String
     @Published var whitelistText: String
     @Published var snippetsText: String
-    @Published var blacklistText: String
+    @Published var appRulesText: String
     @Published var learnedText: String
 
     /// Set by AppDelegate to re-bind global hotkeys live (scenario 9.3).
@@ -37,8 +37,16 @@ final class SettingsModel: ObservableObject {
         self.whitelistText = store.data.whitelistLatin.sorted().joined(separator: "\n")
         self.snippetsText = store.data.snippets.map { "\($0.key) = \($0.value)" }
             .sorted().joined(separator: "\n")
-        self.blacklistText = store.settings.appBlacklist.joined(separator: "\n")
+        var ruleLines = store.data.appRules.map { Self.formatRule($0.key, $0.value) }
+        for b in store.settings.appBlacklist where store.data.appRules[b] == nil {
+            ruleLines.append("\(b) off")
+        }
+        self.appRulesText = ruleLines.sorted().joined(separator: "\n")
         self.learnedText = store.data.learnedWords.sorted().joined(separator: "\n")
+    }
+
+    private static func formatRule(_ bid: String, _ r: AppRule) -> String {
+        bid + " " + r.mode.rawValue + (r.forceLayout.map { " " + $0.rawValue } ?? "")
     }
 
     private func persist() {
@@ -53,11 +61,22 @@ final class SettingsModel: ObservableObject {
             $0.whitelistLatin = Set(tokens(whitelistText))
             $0.snippets = parseSnippets(snippetsText)
             $0.learnedWords = Set(tokens(learnedText))
+            $0.appRules = parseAppRules(appRulesText)
         }
-        settings.appBlacklist = blacklistText
-            .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+        settings.appBlacklist = []      // migrated into appRules (authoritative now)
         coordinator?.syncFromStore()
+    }
+
+    private func parseAppRules(_ text: String) -> [String: AppRule] {
+        var map = [String: AppRule]()
+        for line in text.split(separator: "\n") {
+            let t = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            guard let bid = t.first, !bid.isEmpty else { continue }
+            let mode = (t.count > 1 ? AppRule.Mode(rawValue: t[1].lowercased()) : nil) ?? .auto
+            let layout = t.count > 2 ? Layout(rawValue: t[2].lowercased()) : nil
+            map[bid] = AppRule(mode: mode, forceLayout: layout)
+        }
+        return map
     }
 
     private func parseSnippets(_ text: String) -> [String: String] {
@@ -169,9 +188,9 @@ struct SettingsView: View {
             Text("Выученные слова (3× ручной правки → сюда; можно дописать):")
             TextEditor(text: $model.learnedText).font(.system(.body, design: .monospaced))
                 .frame(height: 70).border(.secondary)
-            Text("Чёрный список приложений (bundle id):")
-            TextEditor(text: $model.blacklistText).font(.system(.body, design: .monospaced))
-                .frame(height: 50).border(.secondary)
+            Text("Правила по приложениям: «bundleID режим [ru|en]» (режим: auto/shadow/off):")
+            TextEditor(text: $model.appRulesText).font(.system(.body, design: .monospaced))
+                .frame(height: 60).border(.secondary)
             HStack {
                 Button("Применить") { model.commitLexicons() }
                 Button("Импорт текста…") { model.importCorpus() }

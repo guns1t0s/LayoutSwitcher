@@ -166,8 +166,9 @@ final class ActionCoordinator: InputCaptureDelegate {
         if context.isSecureInput {                                                // SEC-4
             note(word, "secure"); updateContext(with: word); return
         }
-        if let bid = context.frontmostBundleID, store.settings.appBlacklist.contains(bid) {
-            note(word, "blacklist"); updateContext(with: word); return            // FR-32
+        let rule = effectiveRule(for: context.frontmostBundleID)                   // FR-32 / per-app
+        if rule.mode == .off {
+            note(word, "app-off"); updateContext(with: word); return
         }
 
         let typed = layout.currentLayout()
@@ -178,7 +179,7 @@ final class ActionCoordinator: InputCaptureDelegate {
             updateContext(with: word); return
         }
 
-        if store.settings.shadowMode {                                            // FR-20
+        if store.settings.shadowMode || rule.mode == .shadow {                    // FR-20 / per-app
             note(word, "shadow", converted: decision.converted)
             record(decision, applied: false)
             updateContext(with: word)
@@ -235,7 +236,16 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// switch the system layout. Idempotent-cycling: a second call swaps back.
     /// SEC-4 / FR-32: never read or rewrite text in a secure field or a
     /// blacklisted app — including manual (hotkey) paths, not just auto-convert.
+    /// Per-app behaviour, falling back to the legacy blacklist then global default.
+    private func effectiveRule(for bundleID: String?) -> AppRule {
+        guard let bid = bundleID else { return AppRule() }
+        if let r = store.data.appRules[bid] { return r }
+        if store.settings.appBlacklist.contains(bid) { return AppRule(mode: .off) }
+        return AppRule()
+    }
+
     private func mutationBlocked() -> Bool {
+        if effectiveRule(for: context.frontmostBundleID).mode == .off { return true }
         if layout.isInputMethodActive() { return true }                  // REL-4
         if context.isSecureInput { return true }
         if let bid = context.frontmostBundleID, store.settings.appBlacklist.contains(bid) { return true }
@@ -426,6 +436,10 @@ final class ActionCoordinator: InputCaptureDelegate {
     }
 
     private func proactiveLayout() {
+        // Per-app forced layout wins (e.g. always EN in the terminal).
+        if let bid = context.frontmostBundleID, let force = store.data.appRules[bid]?.forceLayout {
+            layout.select(force); return
+        }
         let role = context.focusedRole()
         if store.settings.latinForUrlEmailSearch,
            role == .secure || role == .search || role == .urlOrEmail {
