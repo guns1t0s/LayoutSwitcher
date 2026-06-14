@@ -166,6 +166,9 @@ final class ActionCoordinator: InputCaptureDelegate {
         if context.isSecureInput {                                                // SEC-4
             note(word, "secure"); updateContext(with: word); return
         }
+        if domainBlocked() {                                                       // REL-6
+            note(word, "domain"); updateContext(with: word); return
+        }
         let rule = effectiveRule(for: context.frontmostBundleID)                   // FR-32 / per-app
         if rule.mode == .off {
             note(word, "app-off"); updateContext(with: word); return
@@ -244,10 +247,19 @@ final class ActionCoordinator: InputCaptureDelegate {
         return AppRule()
     }
 
+    /// REL-6: stand down on a user-listed browser domain (web password/login pages
+    /// that don't expose a secure-text role). Fail-open if the URL is unreadable.
+    private func domainBlocked() -> Bool {
+        guard !store.data.domainBlacklist.isEmpty,
+              let host = AXText.frontmostURL()?.host?.lowercased() else { return false }
+        return store.data.domainBlacklist.contains { !$0.isEmpty && host.contains($0) }
+    }
+
     private func mutationBlocked() -> Bool {
         if effectiveRule(for: context.frontmostBundleID).mode == .off { return true }
         if layout.isInputMethodActive() { return true }                  // REL-4
         if context.isSecureInput { return true }
+        if domainBlocked() { return true }                               // REL-6
         if let bid = context.frontmostBundleID, store.settings.appBlacklist.contains(bid) { return true }
         return false
     }
