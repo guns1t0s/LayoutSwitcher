@@ -40,6 +40,18 @@ final class LayoutController {
         select(cur.other)
     }
 
+    /// REL-4: an input METHOD (CJK/Vietnamese/etc.) is active rather than a plain
+    /// keyboard layout. During IME composition the raw keys are not real text —
+    /// we must stand down (this switcher only handles RU/EN plain layouts).
+    func isInputMethodActive() -> Bool {
+        guard let src = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
+              let ptr = TISGetInputSourceProperty(src, kTISPropertyInputSourceType) else {
+            return false
+        }
+        let type = Unmanaged<CFString>.fromOpaque(ptr).takeUnretainedValue() as String
+        return type != (kTISTypeKeyboardLayout as String)   // plain layout = safe
+    }
+
     // MARK: - text replacement
 
     /// Replace the last `deleteCount` characters before the caret with `text`.
