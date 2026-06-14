@@ -160,6 +160,9 @@ final class ActionCoordinator: InputCaptureDelegate {
         guard !fullscreenActive else {
             note(word, "fullscreen"); updateContext(with: word); return
         }
+        if layout.isInputMethodActive() {                                         // REL-4
+            note(word, "ime"); return       // composing via an IME — not real RU/EN text
+        }
         if context.isSecureInput {                                                // SEC-4
             note(word, "secure"); updateContext(with: word); return
         }
@@ -233,6 +236,7 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// SEC-4 / FR-32: never read or rewrite text in a secure field or a
     /// blacklisted app — including manual (hotkey) paths, not just auto-convert.
     private func mutationBlocked() -> Bool {
+        if layout.isInputMethodActive() { return true }                  // REL-4
         if context.isSecureInput { return true }
         if let bid = context.frontmostBundleID, store.settings.appBlacklist.contains(bid) { return true }
         return false
