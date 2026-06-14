@@ -14,6 +14,14 @@ final class DictionariesTests: XCTestCase {
         XCTAssertNotNil(d.freqRank("the", .en), "EN frequency list missing")
     }
 
+    func testMorphologyRecognizesKnownStemInflections() {
+        let ru = Dictionaries.loadBundled().ru
+        XCTAssertTrue(ru.looksLikeInflection("вопросами"))   // stem "вопрос" is known
+        XCTAssertTrue(ru.looksLikeInflection("системами"))
+        XCTAssertFalse(ru.looksLikeInflection("qwerty"))
+        XCTAssertFalse(ru.looksLikeInflection("zzzzzz"))
+    }
+
     func testHeadlineConversionsFromBundled() {
         let e = DetectionEngine(dictionaries: .loadBundled())
         XCTAssertEqual(e.evaluate("ghbdtn").converted, "привет")

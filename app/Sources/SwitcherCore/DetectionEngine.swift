@@ -14,6 +14,7 @@ public enum DetectionReason: String, Sendable {
     case suppressed              // hold-to-suppress / global toggle off
     case mixedScript             // token mixes RU+EN letters (mid-word switch) — leave it
     case ambiguousResolved       // valid both ways, resolved by frequency + context
+    case morphology              // OOV, but a plausible inflection of a known stem
 }
 
 public struct Decision: Sendable, Equatable {
@@ -192,6 +193,16 @@ public final class DetectionEngine: @unchecked Sendable {
             return Decision(shouldConvert: true, from: current, to: target,
                             original: token, converted: fullConverted,
                             confidence: confidence, reason: .ngramMargin)
+        }
+        // Morphology rescue: the alt reading is a plausible inflection of a KNOWN
+        // stem and the typed reading is not, and the n-gram already leans target.
+        // Lowers the bar for genuine inflected forms without raising FP (the stem
+        // must be real and the typed form must NOT look native in its layout).
+        if margin > 0,
+           altModel.looksLikeInflection(altLC), !curModel.looksLikeInflection(lc) {
+            return Decision(shouldConvert: true, from: current, to: target,
+                            original: token, converted: fullConverted,
+                            confidence: max(0.7, confidence), reason: .morphology)
         }
         return .noop(token, layout: current, reason: .belowThreshold)
     }
