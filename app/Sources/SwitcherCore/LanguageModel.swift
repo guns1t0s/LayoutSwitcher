@@ -24,6 +24,44 @@ public final class LanguageModel: @unchecked Sendable {
         self.vocab = (layout == .ru) ? 34 : 28      // letters + boundary symbol
         self.unkLogProb = log(1.0 / vocab)
         buildTrigrams(from: normalized)
+        buildMorphology(from: normalized)
+    }
+
+    // MARK: - morphology (generalize to unenumerated inflected forms)
+
+    private var stems: Set<String> = []        // dictionary words + their suffix-stripped stems
+    private var suffixes: Set<String> = []     // frequent 2–4 char endings of this language
+
+    private func buildMorphology(from words: [String]) {
+        guard words.count >= 200 else { return }   // need a real corpus to be safe
+        var sufCount = [String: Int]()
+        for w in words where w.count >= 5 {
+            for k in 2...4 where w.count > k + 1 { sufCount[String(w.suffix(k)), default: 0] += 1 }
+        }
+        let minOccur = max(8, words.count / 300)
+        suffixes = Set(sufCount.filter { $0.value >= minOccur }.keys)
+        var st = Set(words)
+        for w in words where w.count >= 5 {
+            for s in suffixes where w.hasSuffix(s) {
+                let stem = String(w.dropLast(s.count))
+                if stem.count >= 4 { st.insert(stem) }
+            }
+        }
+        stems = st
+    }
+
+    /// True if `word` is a plausible inflection of a KNOWN stem (its ending is a
+    /// frequent native suffix and the remaining stem is in the dictionary's stem
+    /// set). Lets the flat list generalize to forms it doesn't literally contain,
+    /// grounded in real stems so it stays conservative.
+    public func looksLikeInflection(_ word: String) -> Bool {
+        let w = word.lowercased()
+        guard w.count >= 6 else { return false }
+        for s in suffixes where w.hasSuffix(s) {
+            let stem = String(w.dropLast(s.count))
+            if stem.count >= 4, stems.contains(stem) { return true }
+        }
+        return false
     }
 
     private func buildTrigrams(from words: [String]) {
