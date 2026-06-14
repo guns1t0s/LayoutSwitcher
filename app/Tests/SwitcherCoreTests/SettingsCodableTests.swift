@@ -20,6 +20,9 @@ final class SettingsCodableTests: XCTestCase {
         d.learnedReverts = ["привет": 3]
         d.layoutMemory = ["com.apple.Safari|url": .en, "com.apple.Notes|text": .ru]
         d.snippets = ["брб": "буду рядом быстро"]
+        d.appRules = ["com.apple.Terminal": AppRule(mode: .off),
+                      "com.apple.dt.Xcode": AppRule(mode: .auto, forceLayout: .en),
+                      "com.tinyspeck.slackmacgap": AppRule(mode: .shadow)]
         let data = try JSONEncoder().encode(d)
         let back = try JSONDecoder().decode(UserData.self, from: data)
         XCTAssertEqual(d, back)

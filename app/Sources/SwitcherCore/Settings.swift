@@ -1,5 +1,15 @@
 import Foundation
 
+/// Per-application behaviour rule (generalizes the all-or-nothing blacklist).
+public struct AppRule: Codable, Sendable, Equatable {
+    public enum Mode: String, Codable, Sendable { case auto, shadow, off }
+    public var mode: Mode
+    public var forceLayout: Layout?     // set this layout when the app gets focus
+    public init(mode: Mode = .auto, forceLayout: Layout? = nil) {
+        self.mode = mode; self.forceLayout = forceLayout
+    }
+}
+
 /// A rebindable global hotkey (Carbon virtual keyCode + modifier mask).
 public struct Hotkey: Codable, Sendable, Equatable {
     public var keyCode: UInt32
@@ -84,6 +94,7 @@ public struct UserData: Codable, Sendable, Equatable {
     public var learnedReverts: [String: Int] = [:]   // word → revert count
     public var layoutMemory: [String: Layout] = [:]  // "bundleID|role" → layout
     public var snippets: [String: String] = [:]      // abbrev → expansion (FR-26)
+    public var appRules: [String: AppRule] = [:]      // bundleID → per-app behaviour
     public var learnedWords: Set<String> = []        // promoted to the dictionary
     // NB: the manual-fix tally is deliberately NOT stored here — it would write
     // raw typed words (incl. typos/secrets) to disk, violating SEC-2. The Store
