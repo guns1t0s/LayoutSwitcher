@@ -137,12 +137,18 @@ struct SettingsView: View {
         TabView {
             general.tabItem { Text("Общие") }
             switching.tabItem { Text("Переключение") }
-            lexicons.tabItem { Text("Словари") }
-            textTools.tabItem { Text("Текст") }
-            hotkeys.tabItem { Text("Хоткеи") }
+            scroll(lexicons).tabItem { Text("Словари") }
+            scroll(apps).tabItem { Text("Приложения") }
+            scroll(textTools).tabItem { Text("Текст") }
+            scroll(hotkeys).tabItem { Text("Хоткеи") }
         }
-        .frame(width: 470, height: 440)
+        .frame(width: 520, height: 560)
         .padding()
+    }
+
+    /// Tabs with stacked editors can outgrow the window — keep them scrollable.
+    private func scroll<V: View>(_ content: V) -> some View {
+        ScrollView { content.frame(maxWidth: .infinity, alignment: .leading).padding(.trailing, 4) }
     }
 
     private var general: some View {
@@ -184,27 +190,39 @@ struct SettingsView: View {
     }
 
     private var lexicons: some View {
-        VStack(alignment: .leading) {
+        VStack(alignment: .leading, spacing: 6) {
             Text("Исключения (не конвертировать), по одному в строке:")
             TextEditor(text: $model.exceptionsText).font(.system(.body, design: .monospaced))
-                .frame(height: 110).border(.secondary)
+                .frame(height: 120).border(.secondary)
             Text("Белый список «всегда латиница» (API, sprint, PR…):")
             TextEditor(text: $model.whitelistText).font(.system(.body, design: .monospaced))
-                .frame(height: 70).border(.secondary)
+                .frame(height: 100).border(.secondary)
             Text("Выученные слова (3× ручной правки → сюда; можно дописать):")
             TextEditor(text: $model.learnedText).font(.system(.body, design: .monospaced))
-                .frame(height: 70).border(.secondary)
-            Text("Правила по приложениям: «bundleID режим [ru|en]» (режим: auto/shadow/off):")
-            TextEditor(text: $model.appRulesText).font(.system(.body, design: .monospaced))
-                .frame(height: 50).border(.secondary)
-            Text("Домены без автоконверта (веб-пароли/логины), host по строке:")
-            TextEditor(text: $model.domainsText).font(.system(.body, design: .monospaced))
-                .frame(height: 40).border(.secondary)
+                .frame(height: 100).border(.secondary)
             HStack {
                 Button("Применить") { model.commitLexicons() }
                 Button("Импорт текста…") { model.importCorpus() }
                 Button("Экспорт…") { model.exportData() }
             }
+        }
+    }
+
+    private var apps: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Правила по приложениям, по строке «bundleID режим [ru|en]»:")
+            Text("режим: auto (обычно) / shadow (только лог) / off (не трогать)")
+                .font(.caption).foregroundStyle(.secondary)
+            TextEditor(text: $model.appRulesText).font(.system(.body, design: .monospaced))
+                .frame(height: 120).border(.secondary)
+            Text("Пример: com.apple.Terminal off — или — com.app auto en")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("Домены без автоконверта (веб-пароли/логины), host по строке:")
+            TextEditor(text: $model.domainsText).font(.system(.body, design: .monospaced))
+                .frame(height: 120).border(.secondary)
+            Text("Пример: login.microsoftonline.com")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Применить") { model.commitLexicons() }
         }
     }
 
