@@ -309,24 +309,30 @@ final class ActionCoordinator: InputCaptureDelegate {
         let to = from.other
         let converted = KeyMap.convert(text, to: to)
         let plan = CorrectionPlanner.replace(original: text, with: converted, boundary: boundary)
+        // Snapshot BEFORE the async hop. If the user types between the double-⇧
+        // gesture and this running, the on-screen word grew but deleteCount is
+        // stale → deleting too few left a leading character ("gпривет"). Any new
+        // keystroke bumps keystrokeEpoch → abort cleanly (no state mutated). All
+        // state changes live inside the guard so an abort leaves nothing half-done.
+        let epoch = keystrokeEpoch
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.keystrokeEpoch == epoch else { return }
             self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             self.layout.select(to)
             self.feedback()
             self.onConversionApplied?(to, converted)
+            if inProgress { self.buffer.reset() }
+            // Enable the cycle: a second double-⇧ swaps the converted form back.
+            self.lastCompleted = LastWord(text: converted, boundary: boundary)
+            self.lastConversion = LastConversion(original: text, converted: converted,
+                                                 boundary: boundary, layoutBefore: from)
+            // Learn from repeated manual fixes: after N, the word joins the dictionary.
+            if !converted.contains(" "), self.store.recordManualFix(converted) {
+                self.engine.learnedWords = self.store.data.learnedWords
+                self.onWordLearned?(converted)
+            }
+            self.onChange?()
         }
-        if inProgress { buffer.reset() }
-        // Enable the cycle: a second double-⇧ swaps the converted form back.
-        lastCompleted = LastWord(text: converted, boundary: boundary)
-        lastConversion = LastConversion(original: text, converted: converted,
-                                        boundary: boundary, layoutBefore: from)
-        // Learn from repeated manual fixes: after N, the word joins the dictionary.
-        if !converted.contains(" "), store.recordManualFix(converted) {
-            engine.learnedWords = store.data.learnedWords
-            onWordLearned?(converted)
-        }
-        onChange?()
     }
 
     /// Manual layout switch (FR-13 / scenario 4.5 — double ⇧). Does NOT convert
