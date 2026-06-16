@@ -91,62 +91,6 @@ final class LayoutController {
         up.post(tap: .cgSessionEventTap)
     }
 
-    // MARK: - clipboard-based selection edit (Electron / chat apps)
-
-    /// Replace the current selection with `text` via Cmd+V, preserving the user's
-    /// clipboard. Reliable where AX selection writes silently fail.
-    func paste(_ text: String) {
-        let saved = savePasteboard()
-        let pb = NSPasteboard.general
-        pb.clearContents(); pb.setString(text, forType: .string)
-        // Delay ⌘V so the triggering hotkey chord (⌃⌥…) is fully released first.
-        // A still-held ⌥ otherwise leaks past the event flags and inserts an
-        // Option-character in front of the paste ("extra letter at the start").
-        DispatchQueue.main.asyncAfter(deadline: .now() + comboReleaseDelay) {
-            self.postKey(virtualKey: CGKeyCode(kVK_ANSI_V), flags: .maskCommand)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.restorePasteboard(saved) }
-    }
-
-    /// Time to let a held hotkey chord (⌃⌥…) release before injecting ⌘C/⌘V.
-    private let comboReleaseDelay: TimeInterval = 0.07
-
-    /// Copy the current selection, transform it, paste it back. `completion(false)`
-    /// if nothing was selected (caller can fall back to last-word fix).
-    func convertSelectionViaClipboard(transform: @escaping (String) -> String,
-                                      completion: @escaping (Bool) -> Void) {
-        let pb = NSPasteboard.general
-        let saved = savePasteboard()
-        let before = pb.changeCount
-        // Let the hotkey chord release before ⌘C (see comboReleaseDelay).
-        DispatchQueue.main.asyncAfter(deadline: .now() + comboReleaseDelay) {
-        self.postKey(virtualKey: CGKeyCode(kVK_ANSI_C), flags: .maskCommand)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            guard pb.changeCount != before,
-                  let sel = pb.string(forType: .string), !sel.isEmpty else {
-                self.restorePasteboard(saved); completion(false); return
-            }
-            pb.clearContents(); pb.setString(transform(sel), forType: .string)
-            self.postKey(virtualKey: CGKeyCode(kVK_ANSI_V), flags: .maskCommand)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.restorePasteboard(saved) }
-            completion(true)
-        }
-        }
-    }
-
-    private func savePasteboard() -> [NSPasteboardItem] {
-        (NSPasteboard.general.pasteboardItems ?? []).map { item in
-            let copy = NSPasteboardItem()
-            for t in item.types { if let d = item.data(forType: t) { copy.setData(d, forType: t) } }
-            return copy
-        }
-    }
-    private func restorePasteboard(_ items: [NSPasteboardItem]) {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        if !items.isEmpty { pb.writeObjects(items) }
-    }
-
     // MARK: - TIS helpers
 
     private func languages(of source: TISInputSource) -> [String] {

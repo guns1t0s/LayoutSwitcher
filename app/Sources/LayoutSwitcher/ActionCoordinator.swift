@@ -266,38 +266,28 @@ final class ActionCoordinator: InputCaptureDelegate {
 
     func fix() {
         guard !mutationBlocked() else { return }
-        // 1) Actively typing → convert the in-progress word (fast, no clipboard).
+        // 1) Actively typing → convert the in-progress word (synthetic, reliable).
         if !buffer.isEmpty {
             fixWord(buffer.word, boundary: nil, inProgress: true); return
         }
-        // 2) Selection exposed via Accessibility (native apps). Write via paste.
+        // 2) A real selection → convert it directly via Accessibility.
         if let sel = AXText.selectedText(), sel.contains(where: { $0.isLetter }) {
             convertSelection(sel); return
         }
-        // 3) Last finished word (e.g. "пшерги " + double-⇧ → "github "). This must
-        //    come BEFORE the clipboard probe — a Cmd+C with nothing selected is
-        //    unreliable in chat/Electron apps and would swallow this common case.
+        // 3) Last finished word (e.g. "пшерги " + double-⇧ → "github ").
         if let last = lastCompleted {
             fixWord(last.text, boundary: last.boundary, inProgress: false); return
         }
-        // 4) No typed-word state (after a click / arrow-key selection that reset it)
-        //    → a real selection in an app where AX is blind: clipboard round-trip.
-        var target: Layout?
-        layout.convertSelectionViaClipboard(transform: { [weak self] sel in
-            let from = sel.dominantLayout ?? self?.layout.currentLayout() ?? .en
-            target = from.other
-            return KeyMap.convert(sel, to: from.other)
-        }, completion: { [weak self] handled in
-            guard let self, handled, let to = target else { return }
-            self.layout.select(to); self.onConversionApplied?(to, nil); self.onChange?()
-        })
+        // Nothing to fix. We deliberately do NOT probe the clipboard: a Cmd+C/Cmd+V
+        // round-trip in Electron/chat apps grabbed and pasted the user's REAL
+        // clipboard (a URL → an auto-link) — corruption far worse than a miss.
     }
 
-    /// Convert an AX-detected selection, writing back via the clipboard/paste.
+    /// Convert an AX-detected selection in place (direct AX write — no clipboard).
     private func convertSelection(_ sel: String) {
         let from = sel.dominantLayout ?? layout.currentLayout() ?? .en
         let to = from.other
-        layout.paste(KeyMap.convert(sel, to: to))
+        guard AXText.replaceSelection(with: KeyMap.convert(sel, to: to)) else { return }
         layout.select(to)
         onConversionApplied?(to, nil)
         onChange?()
@@ -418,14 +408,13 @@ final class ActionCoordinator: InputCaptureDelegate {
     func cycleCaseSelection() { convertSelectionTool { CaseConverter.cycle($0) } }
     func fixCapsSelection() { convertSelectionTool { TextFixes.fixCapsLock(TextFixes.fixDoubleCapital($0)) } }
 
-    /// Apply a transform to the current selection. AX read + paste where exposed,
-    /// otherwise a clipboard copy/paste round-trip (Electron/chat apps).
+    /// Apply a transform to the current selection via a direct Accessibility
+    /// write — never the clipboard (that pasted the user's real clipboard in
+    /// Electron). If AX can't read the selection, no-op (a miss, not corruption).
     private func convertSelectionTool(_ transform: @escaping (String) -> String) {
         guard !mutationBlocked() else { return }
-        if let sel = AXText.selectedText(), !sel.isEmpty {
-            layout.paste(transform(sel)); return
-        }
-        layout.convertSelectionViaClipboard(transform: transform) { _ in }
+        guard let sel = AXText.selectedText(), !sel.isEmpty else { return }
+        _ = AXText.replaceSelection(with: transform(sel))
     }
 
     // MARK: - focus changes (FR-4/5/6, FR-31)
