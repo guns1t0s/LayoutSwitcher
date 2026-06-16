@@ -60,6 +60,19 @@ final class EvalHarnessTests: XCTestCase {
         XCTAssertLessThanOrEqual(missPct, 20.0, "too many missed conversions")
     }
 
+    // Valid Russian words NOT in the dictionary — measures how well the
+    // interpolated n-gram + morphology generalize (informational, not gated).
+    private let oovIntended = ["отдать", "раскрытию", "подсказать", "подстановке", "конфиг"]
+
+    func testOOVGeneralizationReport() {
+        let e = engine()
+        var converted = 0
+        for w in oovIntended where e.evaluate(KeyMap.convert(w, to: .en)).converted == w { converted += 1 }
+        print("[oov] \(converted)/\(oovIntended.count) OOV wrong-layout words converted (generalization)")
+        // FP guard still holds: typing them correctly (in RU) must NOT convert.
+        for w in oovIntended { XCTAssertFalse(e.evaluate(w).shouldConvert, "\(w) corrupted") }
+    }
+
     /// Informational sweep — prints the FP/miss tradeoff across thresholds so the
     /// magic numbers (threshold / minMargin) can be tuned on real data.
     func testParameterSweepReport() {

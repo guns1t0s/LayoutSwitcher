@@ -10,10 +10,14 @@ import Foundation
 public final class LanguageModel: @unchecked Sendable {
     public let layout: Layout
     private let words: Set<String>
-    private var trigrams: [String: Double] = [:]   // log P(c3 | c1 c2)
-    private var bigramTotals: [String: Double] = [:]
+    // Raw character n-gram counts for linear interpolation (deletes the old
+    // floor-dominated add-1 trigram, which barely discriminated OOV words).
+    private var uni: [Character: Double] = [:]
+    private var bi: [String: Double] = [:]
+    private var tri: [String: Double] = [:]
+    private var uniTotal: Double = 0
     private let vocab: Double                       // alphabet size for smoothing
-    private let unkLogProb: Double                  // floor for unseen trigrams
+    private let unkLogProb: Double                  // floor
 
     public init(layout: Layout, words rawWords: [String]) {
         self.layout = layout
@@ -23,7 +27,7 @@ public final class LanguageModel: @unchecked Sendable {
         self.words = Set(normalized)
         self.vocab = (layout == .ru) ? 34 : 28      // letters + boundary symbol
         self.unkLogProb = log(1.0 / vocab)
-        buildTrigrams(from: normalized)
+        buildNgrams(from: normalized)
         buildMorphology(from: normalized)
     }
 
@@ -64,28 +68,17 @@ public final class LanguageModel: @unchecked Sendable {
         return false
     }
 
-    private func buildTrigrams(from words: [String]) {
-        // Pad each word with boundary markers so word-initial / word-final
-        // sequences are modelled. "^" and "$" are out-of-alphabet sentinels.
-        var triCounts = [String: Double]()
-        var biCounts = [String: Double]()
+    private func buildNgrams(from words: [String]) {
+        // Pad with boundary sentinels (^ start, $ end) so word edges are modelled.
         for w in words {
-            let padded = "^^" + w + "$"
-            let chars = Array(padded)
-            guard chars.count >= 3 else { continue }
-            for i in 0...(chars.count - 3) {
-                let bi = String(chars[i...(i + 1)])
-                let tri = String(chars[i...(i + 2)])
-                biCounts[bi, default: 0] += 1
-                triCounts[tri, default: 0] += 1
+            let chars = Array("^^" + w + "$")
+            for c in chars { uni[c, default: 0] += 1; uniTotal += 1 }
+            if chars.count >= 2 {
+                for i in 0...(chars.count - 2) { bi[String(chars[i...(i + 1)]), default: 0] += 1 }
             }
-        }
-        bigramTotals = biCounts
-        // Add-1 (Laplace) smoothed conditional log-probabilities.
-        for (tri, c) in triCounts {
-            let bi = String(tri.prefix(2))
-            let denom = (biCounts[bi] ?? 0) + vocab
-            trigrams[tri] = log((c + 1) / denom)
+            if chars.count >= 3 {
+                for i in 0...(chars.count - 3) { tri[String(chars[i...(i + 2)]), default: 0] += 1 }
+            }
         }
     }
 
@@ -94,25 +87,24 @@ public final class LanguageModel: @unchecked Sendable {
         words.contains(word.lowercased())
     }
 
-    /// Mean trigram log-probability of `word` under this language.
-    /// Higher (closer to 0) = more native-looking. Range roughly [-log(vocab), 0].
+    /// Mean log-probability of `word` under a linearly-interpolated
+    /// unigram+bigram+trigram character model. Higher = more native-looking. The
+    /// interpolation avoids the old add-1 floor that collapsed seen/unseen
+    /// trigrams together, so a genuine RU/EN word (even OOV) now scores clearly
+    /// above gibberish — the key to converting inflected forms not in the list.
     public func score(_ word: String) -> Double {
-        let w = word.lowercased()
-        let padded = "^^" + w + "$"
-        let chars = Array(padded)
-        guard chars.count >= 3 else { return unkLogProb }
-        var sum = 0.0
-        var n = 0
+        let chars = Array("^^" + word.lowercased() + "$")
+        guard chars.count >= 3, uniTotal > 0 else { return unkLogProb }
+        let l3 = 0.6, l2 = 0.3, l1 = 0.1
+        var sum = 0.0, n = 0
         for i in 0...(chars.count - 3) {
-            let tri = String(chars[i...(i + 2)])
-            if let lp = trigrams[tri] {
-                sum += lp
-            } else {
-                // Back off to add-1 over the (possibly unseen) bigram context.
-                let bi = String(tri.prefix(2))
-                let denom = (bigramTotals[bi] ?? 0) + vocab
-                sum += log(1.0 / denom)
-            }
+            let c1 = chars[i], c2 = chars[i + 1], c3 = chars[i + 2]
+            let ctx2 = String([c1, c2])
+            let p3 = (bi[ctx2] ?? 0) > 0 ? (tri[String([c1, c2, c3])] ?? 0) / bi[ctx2]! : 0
+            let p2 = (uni[c2] ?? 0) > 0 ? (bi[String([c2, c3])] ?? 0) / uni[c2]! : 0
+            let p1 = (uni[c3] ?? 0) / uniTotal
+            let p = l3 * p3 + l2 * p2 + l1 * p1
+            sum += log(max(p, 1e-7))
             n += 1
         }
         return n > 0 ? sum / Double(n) : unkLogProb
