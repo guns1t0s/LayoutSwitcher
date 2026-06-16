@@ -99,9 +99,17 @@ final class LayoutController {
         let saved = savePasteboard()
         let pb = NSPasteboard.general
         pb.clearContents(); pb.setString(text, forType: .string)
-        postKey(virtualKey: CGKeyCode(kVK_ANSI_V), flags: .maskCommand)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.restorePasteboard(saved) }
+        // Delay ⌘V so the triggering hotkey chord (⌃⌥…) is fully released first.
+        // A still-held ⌥ otherwise leaks past the event flags and inserts an
+        // Option-character in front of the paste ("extra letter at the start").
+        DispatchQueue.main.asyncAfter(deadline: .now() + comboReleaseDelay) {
+            self.postKey(virtualKey: CGKeyCode(kVK_ANSI_V), flags: .maskCommand)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.restorePasteboard(saved) }
     }
+
+    /// Time to let a held hotkey chord (⌃⌥…) release before injecting ⌘C/⌘V.
+    private let comboReleaseDelay: TimeInterval = 0.07
 
     /// Copy the current selection, transform it, paste it back. `completion(false)`
     /// if nothing was selected (caller can fall back to last-word fix).
@@ -110,7 +118,9 @@ final class LayoutController {
         let pb = NSPasteboard.general
         let saved = savePasteboard()
         let before = pb.changeCount
-        postKey(virtualKey: CGKeyCode(kVK_ANSI_C), flags: .maskCommand)
+        // Let the hotkey chord release before ⌘C (see comboReleaseDelay).
+        DispatchQueue.main.asyncAfter(deadline: .now() + comboReleaseDelay) {
+        self.postKey(virtualKey: CGKeyCode(kVK_ANSI_C), flags: .maskCommand)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
             guard pb.changeCount != before,
                   let sel = pb.string(forType: .string), !sel.isEmpty else {
@@ -120,6 +130,7 @@ final class LayoutController {
             self.postKey(virtualKey: CGKeyCode(kVK_ANSI_V), flags: .maskCommand)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.restorePasteboard(saved) }
             completion(true)
+        }
         }
     }
 
