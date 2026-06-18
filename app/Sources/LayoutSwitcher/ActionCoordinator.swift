@@ -265,32 +265,42 @@ final class ActionCoordinator: InputCaptureDelegate {
     }
 
     func fix() {
-        guard !mutationBlocked() else { return }
+        guard !mutationBlocked() else { note("⌃⌥Z", "blocked"); return }
         // 1) Actively typing → convert the in-progress word (synthetic, reliable).
         if !buffer.isEmpty {
+            note(buffer.word, "fix-buffer")
             fixWord(buffer.word, boundary: nil, inProgress: true); return
         }
-        // 2) A real selection → convert it directly via Accessibility.
+        // 2) A real selection (read via AX) → convert it synthetically.
         if let sel = AXText.selectedText(), sel.contains(where: { $0.isLetter }) {
+            note(sel.prefix(16).description, "fix-selection")
             convertSelection(sel); return
         }
         // 3) Last finished word (e.g. "пшерги " + double-⇧ → "github ").
         if let last = lastCompleted {
+            note(last.text, "fix-last")
             fixWord(last.text, boundary: last.boundary, inProgress: false); return
         }
         // Nothing to fix. We deliberately do NOT probe the clipboard: a Cmd+C/Cmd+V
         // round-trip in Electron/chat apps grabbed and pasted the user's REAL
         // clipboard (a URL → an auto-link) — corruption far worse than a miss.
+        note("⌃⌥Z", "nothing-to-fix")
     }
 
-    /// Convert an AX-detected selection in place (direct AX write — no clipboard).
+    /// Convert an AX-read selection by replacing it SYNTHETICALLY (Backspace +
+    /// insert) — works in Electron where AX writes no-op; never the clipboard.
     private func convertSelection(_ sel: String) {
         let from = sel.dominantLayout ?? layout.currentLayout() ?? .en
         let to = from.other
-        guard AXText.replaceSelection(with: KeyMap.convert(sel, to: to)) else { return }
-        layout.select(to)
-        onConversionApplied?(to, nil)
-        onChange?()
+        let converted = KeyMap.convert(sel, to: to)
+        let epoch = keystrokeEpoch
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) { [weak self] in   // let ⌃⌥/⇧ release
+            guard let self, self.keystrokeEpoch == epoch else { return }
+            self.layout.replaceSelection(with: converted)
+            self.layout.select(to)
+            self.onConversionApplied?(to, nil)
+            self.onChange?()
+        }
     }
 
     /// Convert a single word in place via synthetic Backspace + insert.
@@ -414,7 +424,10 @@ final class ActionCoordinator: InputCaptureDelegate {
     private func convertSelectionTool(_ transform: @escaping (String) -> String) {
         guard !mutationBlocked() else { return }
         guard let sel = AXText.selectedText(), !sel.isEmpty else { return }
-        _ = AXText.replaceSelection(with: transform(sel))
+        let result = transform(sel)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) { [weak self] in   // let ⌃⌥ release
+            self?.layout.replaceSelection(with: result)
+        }
     }
 
     // MARK: - focus changes (FR-4/5/6, FR-31)
