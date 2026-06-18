@@ -91,6 +91,15 @@ final class LayoutController {
         up.post(tap: .cgSessionEventTap)
     }
 
+    /// Replace the CURRENTLY SELECTED text with `text` synthetically: one
+    /// Backspace deletes the whole active selection, then insert the new text.
+    /// Works where AX selection writes silently no-op (Electron/Chromium) and
+    /// never touches the clipboard. Caller must have confirmed a live selection.
+    func replaceSelection(with text: String) {
+        postKey(virtualKey: 51, flags: [])      // Backspace → clears the selection
+        if !text.isEmpty { insert(text) }
+    }
+
     // MARK: - TIS helpers
 
     private func languages(of source: TISInputSource) -> [String] {
