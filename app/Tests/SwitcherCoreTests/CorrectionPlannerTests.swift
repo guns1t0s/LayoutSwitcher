@@ -30,6 +30,23 @@ final class CorrectionPlannerTests: XCTestCase {
         XCTAssertEqual(p.insertText, "привет " + KeyMap.convert("ds", to: .ru))
     }
 
+    // Swallow path: boundary not yet on screen → delete word only, boundary goes
+    // into the inserted text (synchronous, race-free).
+    func testAutoConvertSwallowKeepsBoundaryInInsert() {
+        let p = CorrectionPlanner.autoConvertSwallow(original: "rjulf", converted: "когда",
+                                                     boundary: " ")
+        XCTAssertEqual(p.deleteCount, 5)            // word only, NOT the space
+        XCTAssertEqual(p.insertText, "когда ")
+        XCTAssertEqual(p.convertedExtras, "")
+    }
+
+    func testAutoConvertSwallowPunctBoundary() {
+        let p = CorrectionPlanner.autoConvertSwallow(original: "ghbdtn", converted: "привет",
+                                                     boundary: "!")
+        XCTAssertEqual(p.deleteCount, 6)
+        XCTAssertEqual(p.insertText, "привет!")
+    }
+
     func testReplaceWithBoundary() {
         let p = CorrectionPlanner.replace(original: "omw", with: "on my way", boundary: " ")
         XCTAssertEqual(p.deleteCount, 4)            // 3 + space
