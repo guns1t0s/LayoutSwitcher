@@ -33,6 +33,7 @@ enum SelfTest {
         check("vbhjds[", expectConvert: true, expect: "мировых")   // trailing х([) as letter
         check("gjybvfybz", expectConvert: true, expect: "понимания")
         check("njkmrj", expectConvert: true, expect: "только")
+        check("lheubt", expectConvert: true, expect: "другие")
         check("ghbdtn.", expectConvert: true, expect: "привет.")   // trailing period preserved
 
         func eq(_ label: String, _ got: String, _ want: String) {
