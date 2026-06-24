@@ -50,6 +50,17 @@ final class ContextProvider {
         return .unknown
     }
 
+    /// Is the user focused on an EDITABLE text field right now? Used to keep
+    /// converting in a fullscreen window when it is actually a text editor / chat
+    /// (the "disable in fullscreen" guard is meant for games & video players that
+    /// have no text focus, not for someone typing in a fullscreen Electron app).
+    func hasEditableTextFocus() -> Bool {
+        switch focusedRole() {
+        case .generic, .search, .urlOrEmail: return true
+        case .secure, .unknown: return false
+        }
+    }
+
     /// FR-5: latin-by-default field?
     func prefersLatin() -> Bool {
         switch focusedRole() {

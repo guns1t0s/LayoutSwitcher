@@ -152,6 +152,7 @@ answering
 answers
 ant
 anthem
+anthropic
 antibiotic
 antibody
 antigen
@@ -696,6 +697,7 @@ clarified
 clarify
 class
 classes
+claude
 clavicle
 clay
 clean
@@ -2624,6 +2626,7 @@ objects
 observation
 observe
 observed
+obsidian
 obvious
 obviously
 ocean
