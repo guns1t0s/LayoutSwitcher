@@ -36,6 +36,7 @@ enum SelfTest {
         check("lheubt", expectConvert: true, expect: "другие")
         check("rjulf", expectConvert: true, expect: "когда")
         check("ghbdtn.", expectConvert: true, expect: "привет.")   // trailing period preserved
+        check("dsltkbk", expectConvert: true, expect: "выделил")   // past tense (paradigm fill)
 
         func eq(_ label: String, _ got: String, _ want: String) {
             let pass = got == want; ok = ok && pass
