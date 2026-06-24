@@ -474,7 +474,14 @@ final class ActionCoordinator: InputCaptureDelegate {
         // 1) Mid-word: ignore. Electron/chat apps spam focused-element-changed
         //    while typing; acting on it would corrupt the word in progress.
         guard buffer.isEmpty else { return }
-        fullscreenActive = store.settings.disableInFullscreen && AXText.isFrontmostFullscreen()
+        // Suppress in fullscreen ONLY when there is no editable text focus — a
+        // fullscreen game/video should stand down, but a fullscreen editor or
+        // chat (common for Electron apps) is exactly where the user types and
+        // needs conversion. Without this, every word in a fullscreen Claude /
+        // Obsidian window was silently dropped ("fullscreen" guard).
+        fullscreenActive = store.settings.disableInFullscreen
+            && AXText.isFrontmostFullscreen()
+            && !context.hasEditableTextFocus()
 
         // 2) Only switch layout when the FRONTMOST APP actually changed. A letter
         //    typed in the wrong layout can emit punctuation (e.g. "б"→","), which
