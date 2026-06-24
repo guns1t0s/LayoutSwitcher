@@ -30,6 +30,20 @@ public enum CorrectionPlanner {
         )
     }
 
+    /// Synchronous boundary conversion where the boundary keystroke is SWALLOWED
+    /// (consumed in the tap callback before delivery) and re-inserted by us. No
+    /// async gap exists, so a following keystroke can't race the replacement out.
+    ///
+    /// On-screen before: `<original>` — the boundary char has NOT been delivered
+    /// yet (we are about to drop it). After: `<converted><boundary>`. Hence
+    /// deleteCount covers the word only; the boundary lives in insertText.
+    public static func autoConvertSwallow(original: String, converted: String,
+                                          boundary: Character?) -> ReplacePlan {
+        let b = boundary.map(String.init) ?? ""
+        return ReplacePlan(deleteCount: original.count,
+                           insertText: converted + b, convertedExtras: "")
+    }
+
     /// Plain replacement of a finished word (+ optional trailing boundary) with
     /// fixed text — snippets, manual fix, undo. No extras absorbed.
     public static func replace(original: String, with text: String,

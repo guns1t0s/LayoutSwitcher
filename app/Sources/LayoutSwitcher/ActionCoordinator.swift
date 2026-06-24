@@ -90,26 +90,33 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// do NOT bump it — a late replacement can absorb them (see onBoundary).
     private var disruptionEpoch = 0
 
-    func inputDidKeyDown(keycode: Int64, chars: String, flags: CGEventFlags) {
+    @discardableResult
+    func inputDidKeyDown(keycode: Int64, chars: String, flags: CGEventFlags) -> Bool {
         keystrokeEpoch &+= 1
         switch keycode {
         case 51:                                   // Backspace
             disruptionEpoch &+= 1
             if !buffer.backspace() { resetWordState() }
-            return
+            return false
         case 117, 53, 71, 115, 116, 119, 121, 123, 124, 125, 126:  // fwd-del/esc/clear/nav
-            resetWordState(); return
+            resetWordState(); return false
         case 36, 76:                               // Return / Enter
-            commitBoundary("\n"); return
+            commitBoundary("\n"); return false     // async path (Enter has side effects)
         case 48:                                   // Tab
-            commitBoundary("\t"); return
+            commitBoundary("\t"); return false
         default:
             break
         }
+        // Space / punctuation boundaries take the SYNCHRONOUS swallow path: if the
+        // finished word converts, we drop this boundary keystroke and re-insert it
+        // ourselves, so no async gap exists for the next keystroke to race.
         for c in chars {
             let step = buffer.input(c)
-            if let word = step.completedWord { onBoundary(word, step.boundary) }
+            if let word = step.completedWord, onBoundary(word, step.boundary, canSwallow: true) {
+                return true
+            }
         }
+        return false
     }
 
     func inputDidChangeFlags(_ flags: CGEventFlags) {
@@ -127,10 +134,17 @@ final class ActionCoordinator: InputCaptureDelegate {
 
     private func commitBoundary(_ b: Character) {
         let step = buffer.input(b)
-        if let word = step.completedWord { onBoundary(word, step.boundary) }
+        if let word = step.completedWord { _ = onBoundary(word, step.boundary, canSwallow: false) }
     }
 
-    private func onBoundary(_ word: String, _ boundary: Character?) {
+    /// Decide and (maybe) apply an auto-conversion at a word boundary.
+    /// Returns `true` IFF it applied a synchronous swallowing conversion — the
+    /// caller must then consume the boundary keystroke (the boundary char is
+    /// re-inserted inside the replacement). `canSwallow` is false for Enter/Tab,
+    /// which keep the legacy async path because the raw keystroke has side
+    /// effects (submit / focus move) we must let through, not re-synthesize.
+    @discardableResult
+    private func onBoundary(_ word: String, _ boundary: Character?, canSwallow: Bool) -> Bool {
         boundariesSeen += 1
         lastCompleted = LastWord(text: word, boundary: boundary)
 
@@ -138,40 +152,40 @@ final class ActionCoordinator: InputCaptureDelegate {
         if store.settings.expandSnippets,
            let expansion = Snippets.expand(word, using: store.data.snippets) {
             applyReplacement(word, with: expansion, boundary: boundary, layoutAfter: nil)
-            return
+            return false
         }
-        // FR-25: fix accidental Caps Lock ("пРИВЕТ"→"Привет") and two leading
+        // FR-25: fix accidental Caps Lock ("пRИВЕТ"→"Привет") and two leading
         // capitals on the fly (opt-in). Caps-lock pattern is a strong signature
         // (first letter lower, rest upper) → low false-positive.
         if store.settings.autoFixCapitals {
             let fixed = TextFixes.fixCapsLock(TextFixes.fixDoubleCapital(word))
             if fixed != word {
                 applyReplacement(word, with: fixed, boundary: boundary, layoutAfter: nil)
-                return
+                return false
             }
         }
 
         guard store.settings.autoConvertEnabled else {
-            note(word, "off"); updateContext(with: word); return
+            note(word, "off"); updateContext(with: word); return false
         }
         guard !suppressActive else {
-            note(word, "fn-suppress"); updateContext(with: word); return
+            note(word, "fn-suppress"); updateContext(with: word); return false
         }
         guard !fullscreenActive else {
-            note(word, "fullscreen"); updateContext(with: word); return
+            note(word, "fullscreen"); updateContext(with: word); return false
         }
         if layout.isInputMethodActive() {                                         // REL-4
-            note(word, "ime"); return       // composing via an IME — not real RU/EN text
+            note(word, "ime"); return false // composing via an IME — not real RU/EN text
         }
         if context.isSecureInput {                                                // SEC-4
-            note(word, "secure"); updateContext(with: word); return
+            note(word, "secure"); updateContext(with: word); return false
         }
         if domainBlocked() {                                                       // REL-6
-            note(word, "domain"); updateContext(with: word); return
+            note(word, "domain"); updateContext(with: word); return false
         }
         let rule = effectiveRule(for: context.frontmostBundleID)                   // FR-32 / per-app
         if rule.mode == .off {
-            note(word, "app-off"); updateContext(with: word); return
+            note(word, "app-off"); updateContext(with: word); return false
         }
 
         let typed = layout.currentLayout()
@@ -179,28 +193,52 @@ final class ActionCoordinator: InputCaptureDelegate {
         lastReason = decision.reason.rawValue
         guard decision.shouldConvert else {
             note(word, decision.reason.rawValue)
-            updateContext(with: word); return
+            updateContext(with: word); return false
         }
 
         if store.settings.shadowMode || rule.mode == .shadow {                    // FR-20 / per-app
             note(word, "shadow", converted: decision.converted)
             record(decision, applied: false)
             updateContext(with: word)
-            return
+            return false
         }
 
-        // Boundary interrupts an earlier pending replacement of the previous word.
+        conversionsApplied += 1
+        note(word, decision.reason.rawValue, converted: decision.converted)
+        lastConversion = LastConversion(original: word, converted: decision.converted,
+                                        boundary: boundary, layoutBefore: decision.from)
+        lastContextLayout = decision.to
+
+        if canSwallow {
+            // SYNCHRONOUS path: the boundary keystroke is about to be swallowed,
+            // so on screen the word sits WITHOUT its boundary char. Delete the
+            // word, insert converted + boundary. No async, no epoch — nothing can
+            // race it out. UI side effects are deferred so the tap callback stays
+            // fast (REL-2).
+            let plan = CorrectionPlanner.autoConvertSwallow(
+                original: word, converted: decision.converted, boundary: boundary)
+            layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
+            layout.select(decision.to)
+            let d = decision
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.feedback()
+                self.onConversionApplied?(d.to, d.converted)
+                self.record(d, applied: true)
+            }
+            return true
+        }
+
+        // ASYNC path (Enter/Tab): let the raw boundary keystroke through and apply
+        // the replacement on the next runloop turn, aborting if a disruptive event
+        // intervenes. Absorbs next-word characters typed during the gap.
         disruptionEpoch &+= 1
         let snapshot = disruptionEpoch
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            // A backspace/click/another boundary arrived first → applying the
-            // stale replacement would corrupt; skip (fail-open).
             guard self.disruptionEpoch == snapshot else {
                 self.note(word, "raced"); return
             }
-            // Absorb plain characters of the next word typed in the same wrong
-            // layout (delete + re-insert converted). Pure math lives in the planner.
             let plan = CorrectionPlanner.autoConvert(
                 original: word, converted: decision.converted, boundary: boundary,
                 extras: self.buffer.word, extrasTo: decision.to)
@@ -209,13 +247,9 @@ final class ActionCoordinator: InputCaptureDelegate {
             if !plan.convertedExtras.isEmpty { self.buffer.replaceWord(plan.convertedExtras) }
             self.feedback()
             self.onConversionApplied?(decision.to, decision.converted)
+            self.record(decision, applied: true)
         }
-        conversionsApplied += 1
-        note(word, decision.reason.rawValue, converted: decision.converted)
-        lastConversion = LastConversion(original: word, converted: decision.converted,
-                                        boundary: boundary, layoutBefore: decision.from)
-        lastContextLayout = decision.to
-        record(decision, applied: true)
+        return false
     }
 
     /// Shared replace used by snippets / autofix (no layout switch).

@@ -2,7 +2,10 @@ import AppKit
 import CoreGraphics
 
 protocol InputCaptureDelegate: AnyObject {
-    func inputDidKeyDown(keycode: Int64, chars: String, flags: CGEventFlags)
+    /// Return `true` to CONSUME the event (the delegate converted a word at this
+    /// boundary and re-inserted the boundary char itself — a synchronous,
+    /// race-free replacement). `false` passes the keystroke through unchanged.
+    func inputDidKeyDown(keycode: Int64, chars: String, flags: CGEventFlags) -> Bool
     func inputDidChangeFlags(_ flags: CGEventFlags)
     func inputDidDoubleShift()
     func inputDidClick()
@@ -168,7 +171,13 @@ final class InputCapture {
             event.keyboardGetUnicodeString(maxStringLength: 8, actualStringLength: &length, unicodeString: &buf)
             let chars = String(utf16CodeUnits: buf, count: length)
             me.otherKeySinceShift = true
-            me.delegate?.inputDidKeyDown(keycode: keycode, chars: chars, flags: event.flags)
+            // The delegate may convert the just-finished word SYNCHRONOUSLY and
+            // swallow this boundary keystroke (re-inserting it itself) — that
+            // eliminates the async race where a fast next keystroke cancelled a
+            // pending conversion in a busy app. Drop the event when it says so.
+            if me.delegate?.inputDidKeyDown(keycode: keycode, chars: chars, flags: event.flags) == true {
+                return nil
+            }
 
         case .flagsChanged:
             me.handleFlags(event.flags)
