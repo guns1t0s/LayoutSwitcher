@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let layout = LayoutController()
     private let context = ContextProvider()
     private let input = InputCapture()
+    private let eventLog = EventLog()
     private let hotkeys = HotkeyManager()
     private let focus = FocusObserver()
     private let overlay = OverlayController()
@@ -24,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let dicts = Dictionaries.loadBundled()
         coordinator = ActionCoordinator(store: store, dictionaries: dicts,
-                                        layout: layout, context: context)
+                                        layout: layout, context: context, eventLog: eventLog)
         input.delegate = coordinator
 
         let model = SettingsModel(store: store, coordinator: coordinator)

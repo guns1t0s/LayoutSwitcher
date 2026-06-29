@@ -106,7 +106,32 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             .target = self
         menu.addItem(withTitle: "Диагностика…", action: #selector(showDiagnostics), keyEquivalent: "")
             .target = self
+
+        let history = NSMenuItem(title: "История срабатываний", action: nil, keyEquivalent: "")
+        history.submenu = buildHistoryMenu(enabled: s.logHistory)
+        menu.addItem(history)
+
         menu.addItem(withTitle: "Выход", action: #selector(quit), keyEquivalent: "q").target = self
+    }
+
+    /// Submenu for the opt-in switching-history log (analyse false triggers).
+    private func buildHistoryMenu(enabled: Bool) -> NSMenu {
+        let sub = NSMenu()
+        let toggle = NSMenuItem(title: "Записывать историю (⇧⇧ + конверсии)",
+                                action: #selector(toggleLogHistory), keyEquivalent: "")
+        toggle.state = enabled ? .on : .off
+        toggle.target = self
+        sub.addItem(toggle)
+        sub.addItem(.separator())
+        let count = coordinator.eventLog.count()
+        sub.addItem(withTitle: "Записей: \(count)", action: nil, keyEquivalent: "")
+        sub.addItem(withTitle: "Показать / копировать…", action: #selector(showHistory), keyEquivalent: "")
+            .target = self
+        sub.addItem(withTitle: "Открыть файл в Finder", action: #selector(revealHistoryFile), keyEquivalent: "")
+            .target = self
+        sub.addItem(withTitle: "Очистить историю", action: #selector(clearHistory), keyEquivalent: "")
+            .target = self
+        return sub
     }
 
     private func add(_ menu: NSMenu, _ title: String, on: Bool, key: String, _ sel: Selector) {
@@ -178,6 +203,28 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(a.informativeText, forType: .string)
         }
+    }
+    @objc private func toggleLogHistory() {
+        coordinator.store.updateSettings { $0.logHistory.toggle() }
+        coordinator.syncFromStore()
+    }
+    @objc private func showHistory() {
+        let a = NSAlert()
+        a.messageText = "История срабатываний"
+        a.informativeText = coordinator.eventLog.report()
+        a.addButton(withTitle: "Копировать всё")
+        a.addButton(withTitle: "Закрыть")
+        NSApp.activate(ignoringOtherApps: true)
+        if a.runModal() == .alertFirstButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(a.informativeText, forType: .string)
+        }
+    }
+    @objc private func revealHistoryFile() {
+        NSWorkspace.shared.activateFileViewerSelecting([coordinator.eventLog.fileURL])
+    }
+    @objc private func clearHistory() {
+        coordinator.eventLog.clear()
     }
     @objc private func addException(_ sender: NSMenuItem) {
         if let w = sender.representedObject as? String { coordinator.addToExceptions(w) }
