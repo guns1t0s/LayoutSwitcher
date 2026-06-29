@@ -7,7 +7,8 @@ protocol InputCaptureDelegate: AnyObject {
     /// race-free replacement). `false` passes the keystroke through unchanged.
     func inputDidKeyDown(keycode: Int64, chars: String, flags: CGEventFlags) -> Bool
     func inputDidChangeFlags(_ flags: CGEventFlags)
-    func inputDidDoubleShift()
+    /// `interval` = seconds between the two ⇧ taps (for spotting accidental gestures).
+    func inputDidDoubleShift(interval: TimeInterval)
     func inputDidClick()
 }
 
@@ -197,7 +198,7 @@ final class InputCapture {
         if shiftNow && !shiftBefore {                 // Shift pressed down
             let now = ProcessInfo.processInfo.systemUptime
             if now - lastShiftPress <= K.doubleShiftWindow && !otherKeySinceShift {
-                delegate?.inputDidDoubleShift()
+                delegate?.inputDidDoubleShift(interval: now - lastShiftPress)
                 lastShiftPress = 0
             } else {
                 lastShiftPress = now

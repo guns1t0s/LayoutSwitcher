@@ -64,6 +64,12 @@ public struct Settings: Codable, Sendable, Equatable {
     // Blacklist (FR-32) — app bundle IDs where the agent stays silent.
     public var appBlacklist: [String] = []
 
+    /// Opt-in diagnostics: persist a history of switching actions (auto-convert,
+    /// double-⇧ fixes, undos) to disk for later analysis of false triggers.
+    /// OFF by default — when on it writes raw typed words, which SEC-2 otherwise
+    /// forbids; the user enables it knowingly to debug erroneous conversions.
+    public var logHistory: Bool = false
+
     public init() {}
 }
 

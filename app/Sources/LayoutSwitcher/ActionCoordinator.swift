@@ -12,6 +12,8 @@ final class ActionCoordinator: InputCaptureDelegate {
     private let layout: LayoutController
     private let context: ContextProvider
     private let buffer = KeystrokeBuffer()
+    /// Opt-in persistent history of switching actions (FR: analyse false triggers).
+    let eventLog: EventLog
 
     /// Recent applied/would-be conversions for the review panel (FR-21). Ring.
     private(set) var shadowLog: [ShadowEntry] = []
@@ -63,12 +65,26 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// Called when a word was learned into the dictionary (3× manual fix).
     var onWordLearned: ((String) -> Void)?
 
-    init(store: Store, dictionaries: Dictionaries, layout: LayoutController, context: ContextProvider) {
+    init(store: Store, dictionaries: Dictionaries, layout: LayoutController,
+         context: ContextProvider, eventLog: EventLog) {
         self.store = store
         self.layout = layout
         self.context = context
+        self.eventLog = eventLog
         self.engine = DetectionEngine(dictionaries: dictionaries)
         syncFromStore()
+    }
+
+    /// Append one switching action to the opt-in history (no-op when disabled).
+    private func log(_ kind: String, branch: String = "", original: String = "",
+                     converted: String = "", from: Layout? = nil, to: Layout? = nil,
+                     reason: String = "", confidence: Double = 0, interval: TimeInterval = -1) {
+        eventLog.record(LoggedEvent(
+            t: Date().timeIntervalSince1970, kind: kind, branch: branch,
+            original: original, converted: converted,
+            from: from?.short.lowercased() ?? "", to: to?.short.lowercased() ?? "",
+            reason: reason, confidence: confidence,
+            app: context.frontmostBundleID ?? "", interval: interval))
     }
 
     /// Pull tunables + lexicons out of the Store into the engine (call on change).
@@ -81,6 +97,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         engine.whitelistLatin = store.data.whitelistLatin
         engine.learnedReverts = store.revertedWords()
         engine.learnedWords = store.data.learnedWords
+        eventLog.enabled = s.logHistory
     }
 
     // MARK: - InputCaptureDelegate
@@ -124,8 +141,8 @@ final class ActionCoordinator: InputCaptureDelegate {
         suppressActive = mask != 0 && (flags.rawValue & UInt64(mask)) == UInt64(mask)
     }
 
-    func inputDidDoubleShift() {
-        if store.settings.doubleShiftConvertWord { fix() }   // convert last word + switch layout
+    func inputDidDoubleShift(interval: TimeInterval) {
+        if store.settings.doubleShiftConvertWord { fix(interval: interval) }  // convert last word + switch
     }
 
     func inputDidClick() { resetWordState() }
@@ -205,6 +222,9 @@ final class ActionCoordinator: InputCaptureDelegate {
 
         conversionsApplied += 1
         note(word, decision.reason.rawValue, converted: decision.converted)
+        log("auto", original: word, converted: decision.converted,
+            from: decision.from, to: decision.to,
+            reason: decision.reason.rawValue, confidence: decision.confidence)
         lastConversion = LastConversion(original: word, converted: decision.converted,
                                         boundary: boundary, layoutBefore: decision.from)
         lastContextLayout = decision.to
@@ -298,27 +318,43 @@ final class ActionCoordinator: InputCaptureDelegate {
         return false
     }
 
-    func fix() {
-        guard !mutationBlocked() else { note("⌃⌥Z", "blocked"); return }
+    func fix(interval: TimeInterval = -1) {
+        guard !mutationBlocked() else {
+            note("⌃⌥Z", "blocked")
+            log("blocked", reason: "mutation-blocked", interval: interval); return
+        }
         // 1) Actively typing → convert the in-progress word (synthetic, reliable).
         if !buffer.isEmpty {
             note(buffer.word, "fix-buffer")
+            logFix(branch: "fix-buffer", text: buffer.word, interval: interval)
             fixWord(buffer.word, boundary: nil, inProgress: true); return
         }
         // 2) A real selection (read via AX) → convert it synthetically.
         if let sel = AXText.selectedText(), sel.contains(where: { $0.isLetter }) {
             note(sel.prefix(16).description, "fix-selection")
+            logFix(branch: "fix-selection", text: sel, interval: interval)
             convertSelection(sel); return
         }
         // 3) Last finished word (e.g. "пшерги " + double-⇧ → "github ").
         if let last = lastCompleted {
             note(last.text, "fix-last")
+            logFix(branch: "fix-last", text: last.text, interval: interval)
             fixWord(last.text, boundary: last.boundary, inProgress: false); return
         }
         // Nothing to fix. We deliberately do NOT probe the clipboard: a Cmd+C/Cmd+V
         // round-trip in Electron/chat apps grabbed and pasted the user's REAL
         // clipboard (a URL → an auto-link) — corruption far worse than a miss.
         note("⌃⌥Z", "nothing-to-fix")
+        // A phantom ⇧⇧ with nothing to convert is a prime accidental-gesture signal.
+        log("phantom", reason: "nothing-to-fix", interval: interval)
+    }
+
+    /// Log a double-⇧ fix, computing the converted form the same way fixWord does.
+    private func logFix(branch: String, text: String, interval: TimeInterval) {
+        let from = text.dominantLayout ?? layout.currentLayout() ?? .en
+        log("doubleShift", branch: branch, original: text,
+            converted: KeyMap.convert(text, to: from.other),
+            from: from, to: from.other, interval: interval)
     }
 
     /// Convert an AX-read selection by replacing it SYNTHETICALLY (Backspace +
@@ -418,6 +454,10 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// Reverse the last conversion and learn from it (FR-15 + FR-18).
     func undo() {
         guard let lc = lastConversion else { return }
+        // An undo retroactively flags the prior conversion as a false positive —
+        // the single most valuable signal for tuning the engine.
+        log("undo", original: lc.converted, converted: lc.original,
+            from: lc.layoutBefore.other, to: lc.layoutBefore, reason: "user-revert")
         let plan = CorrectionPlanner.replace(original: lc.converted, with: lc.original, boundary: lc.boundary)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
