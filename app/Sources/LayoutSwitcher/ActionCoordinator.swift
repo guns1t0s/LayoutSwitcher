@@ -110,6 +110,18 @@ final class ActionCoordinator: InputCaptureDelegate {
     @discardableResult
     func inputDidKeyDown(keycode: Int64, chars: String, flags: CGEventFlags) -> Bool {
         keystrokeEpoch &+= 1
+        // RU layout: remap ⇧+6 (keycode 22) to a comma — the user's muscle memory
+        // puts the comma there. SHIFT only (never hijack ⌘/⌃/⌥+6 shortcuts), and
+        // stand down in secure/blacklisted fields like every other intervention.
+        let onlyShift = flags.contains(.maskShift)
+            && !flags.contains(.maskCommand) && !flags.contains(.maskControl)
+            && !flags.contains(.maskAlternate)
+        if store.settings.ruShift6Comma, keycode == 22, onlyShift,
+           layout.currentLayout() == .ru, !mutationBlocked() {
+            layout.insert(",")
+            _ = buffer.input(",")   // keep the word buffer in sync (soft-punct)
+            return true             // swallow the layout's own ⇧+6 glyph
+        }
         switch keycode {
         case 51:                                   // Backspace
             disruptionEpoch &+= 1

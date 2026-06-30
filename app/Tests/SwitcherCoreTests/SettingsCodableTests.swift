@@ -13,6 +13,27 @@ final class SettingsCodableTests: XCTestCase {
         XCTAssertEqual(s, back)
     }
 
+    /// Regression: a settings.json written by an OLDER build is missing every
+    /// field added since. Decoding must keep the saved values and default only
+    /// the absent ones — NOT throw and wipe the whole configuration.
+    func testTolerantDecodeOfOlderJSONKeepsSavedValues() throws {
+        // Only a few keys present (as an old build would have left them), and a
+        // non-default value for one of them.
+        let legacy = #"{"threshold":0.66,"shadowMode":true,"appBlacklist":["com.apple.Terminal"]}"#
+        let s = try JSONDecoder().decode(Settings.self, from: Data(legacy.utf8))
+        XCTAssertEqual(s.threshold, 0.66)               // saved value preserved
+        XCTAssertTrue(s.shadowMode)                      // saved value preserved
+        XCTAssertEqual(s.appBlacklist, ["com.apple.Terminal"])
+        XCTAssertTrue(s.ruShift6Comma)                   // newest field → its default
+        XCTAssertTrue(s.autoConvertEnabled)              // absent → default true
+        XCTAssertEqual(s.minWordLength, 4)               // absent → default
+    }
+
+    func testEmptyObjectDecodesToAllDefaults() throws {
+        let s = try JSONDecoder().decode(Settings.self, from: Data("{}".utf8))
+        XCTAssertEqual(s, Settings())
+    }
+
     func testUserDataRoundTrip() throws {
         var d = UserData()
         d.exceptions = ["fetch", "ssh"]
