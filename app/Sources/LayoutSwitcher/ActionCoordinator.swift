@@ -75,6 +75,24 @@ final class ActionCoordinator: InputCaptureDelegate {
         syncFromStore()
     }
 
+    /// Run `body` once the gesture modifiers (⇧/⌃/⌥/⌘) have PHYSICALLY released,
+    /// polling the live hardware flag state. Synthetic Backspaces posted while a
+    /// modifier is still down are seen as e.g. Shift+Backspace by apps that read
+    /// the global modifier state (Spotlight) and get dropped — leaving a stray
+    /// leading letter ("кфн" + ⇧⇧ → "кray"). Fires anyway after a bounded wait so
+    /// a stuck modifier can't hang the correction.
+    private func afterModifiersRelease(attempt: Int = 0, _ body: @escaping () -> Void) {
+        let held = CGEventSource.flagsState(.combinedSessionState)
+            .intersection([.maskShift, .maskControl, .maskAlternate, .maskCommand])
+        if !held.isEmpty && attempt < 12 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+                self?.afterModifiersRelease(attempt: attempt + 1, body)
+            }
+        } else {
+            body()
+        }
+    }
+
     /// Append one switching action to the opt-in history (no-op when disabled).
     private func log(_ kind: String, branch: String = "", original: String = "",
                      converted: String = "", from: Layout? = nil, to: Layout? = nil,
@@ -376,7 +394,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         let to = from.other
         let converted = KeyMap.convert(sel, to: to)
         let epoch = keystrokeEpoch
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) { [weak self] in   // let ⌃⌥/⇧ release
+        afterModifiersRelease { [weak self] in
             guard let self, self.keystrokeEpoch == epoch else { return }
             self.layout.replaceSelection(with: converted)
             self.layout.select(to)
@@ -397,7 +415,11 @@ final class ActionCoordinator: InputCaptureDelegate {
         // keystroke bumps keystrokeEpoch → abort cleanly (no state mutated). All
         // state changes live inside the guard so an abort leaves nothing half-done.
         let epoch = keystrokeEpoch
-        DispatchQueue.main.async { [weak self] in
+        // Wait for the gesture's Shift to physically release before deleting —
+        // otherwise the first synthetic Backspace lands as Shift+Backspace in apps
+        // that read global modifier state (Spotlight) and is dropped, leaving a
+        // stray leading letter ("кфн" + ⇧⇧ → "кray" instead of "ray").
+        afterModifiersRelease { [weak self] in
             guard let self, self.keystrokeEpoch == epoch else { return }
             self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             self.layout.select(to)
@@ -511,7 +533,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         guard !mutationBlocked() else { return }
         guard let sel = AXText.selectedText(), !sel.isEmpty else { return }
         let result = transform(sel)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) { [weak self] in   // let ⌃⌥ release
+        afterModifiersRelease { [weak self] in
             self?.layout.replaceSelection(with: result)
         }
     }
