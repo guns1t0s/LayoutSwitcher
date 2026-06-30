@@ -122,6 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Current layout: \(coordinator.currentLayout()?.short ?? "—")
         Auto-convert: \(s.autoConvertEnabled)  Shadow: \(s.shadowMode)
         Suppressing(Fn): \(coordinator.isSuppressing)  Fullscreen-off: \(coordinator.isFullscreen)
+        Frontmost fullscreen: \(AXText.isFrontmostFullscreen())  Editable focus: \(context.hasEditableTextFocus())
         Front app: \(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?")
         Secure input now: \(context.isSecureInput)
         Blacklisted apps: \(s.appBlacklist.count)
