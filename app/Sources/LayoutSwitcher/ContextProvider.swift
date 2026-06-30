@@ -54,11 +54,34 @@ final class ContextProvider {
     /// converting in a fullscreen window when it is actually a text editor / chat
     /// (the "disable in fullscreen" guard is meant for games & video players that
     /// have no text focus, not for someone typing in a fullscreen Electron app).
+    ///
+    /// Role alone is unreliable: web/Electron contenteditable areas often report a
+    /// role we don't classify (.unknown), which wrongly suppressed conversion in a
+    /// fullscreen browser/editor. So if the role check is inconclusive, fall back
+    /// to whether the focused element's VALUE is settable — true for any real text
+    /// input (native or web), false for a game/video with no editable focus.
     func hasEditableTextFocus() -> Bool {
         switch focusedRole() {
         case .generic, .search, .urlOrEmail: return true
-        case .secure, .unknown: return false
+        case .secure: return false
+        case .unknown: return focusedValueIsSettable()
         }
+    }
+
+    /// AX: does the system-wide focused element expose a SETTABLE value? A text
+    /// field / contenteditable does; a button, image, game surface or no-focus
+    /// does not. Fail-closed (false) on any read error.
+    private func focusedValueIsSettable() -> Bool {
+        let system = AXUIElementCreateSystemWide()
+        var focused: AnyObject?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let element = focused else { return false }
+        let el = element as! AXUIElement
+        var settable: DarwinBoolean = false
+        guard AXUIElementIsAttributeSettable(el, kAXValueAttribute as CFString, &settable) == .success else {
+            return false
+        }
+        return settable.boolValue
     }
 
     /// FR-5: latin-by-default field?

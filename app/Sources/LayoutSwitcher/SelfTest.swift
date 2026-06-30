@@ -36,6 +36,8 @@ enum SelfTest {
         check("lheubt", expectConvert: true, expect: "другие")
         check("rjulf", expectConvert: true, expect: "когда")
         check("ghbdtn.", expectConvert: true, expect: "привет.")   // trailing period preserved
+        check("kjubhjdfybt", expectConvert: true, expect: "логирование")  // tech word in dict
+        check("rjvgjytyns", expectConvert: true, expect: "компоненты")
         check("dsltkbk", expectConvert: true, expect: "выделил")   // past tense (paradigm fill)
         check("bnjub", expectConvert: true, expect: "итоги")
         check("rjnjhst", expectConvert: true, expect: "которые")
