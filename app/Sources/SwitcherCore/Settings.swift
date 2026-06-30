@@ -70,7 +70,47 @@ public struct Settings: Codable, Sendable, Equatable {
     /// forbids; the user enables it knowingly to debug erroneous conversions.
     public var logHistory: Bool = false
 
+    /// When the RU layout is active, emit a comma for ⇧+6 instead of the layout's
+    /// own glyph (user preference — their muscle memory puts the comma there).
+    public var ruShift6Comma: Bool = true
+
     public init() {}
+
+    /// Tolerant decoding: a settings.json written by an older build is MISSING any
+    /// field added since, and synthesized Decodable throws on the first missing
+    /// key — which made `Store` fall back to a full default Settings(), silently
+    /// wiping every other saved preference. Decode each key if present, else keep
+    /// its default, so adding fields never resets the user's configuration.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Settings()
+        func v<T: Decodable>(_ k: CodingKeys, _ fallback: T) -> T {
+            (try? c.decodeIfPresent(T.self, forKey: k)) .flatMap { $0 } ?? fallback
+        }
+        autoConvertEnabled    = v(.autoConvertEnabled, d.autoConvertEnabled)
+        shadowMode            = v(.shadowMode, d.shadowMode)
+        startAtLogin          = v(.startAtLogin, d.startAtLogin)
+        threshold             = v(.threshold, d.threshold)
+        minWordLength         = v(.minWordLength, d.minWordLength)
+        convertAmbiguous      = v(.convertAmbiguous, d.convertAmbiguous)
+        showMenuBarIndicator  = v(.showMenuBarIndicator, d.showMenuBarIndicator)
+        showCaretIndicator    = v(.showCaretIndicator, d.showCaretIndicator)
+        showSwitchToast       = v(.showSwitchToast, d.showSwitchToast)
+        rememberLayoutPerApp  = v(.rememberLayoutPerApp, d.rememberLayoutPerApp)
+        latinForUrlEmailSearch = v(.latinForUrlEmailSearch, d.latinForUrlEmailSearch)
+        doubleShiftConvertWord = v(.doubleShiftConvertWord, d.doubleShiftConvertWord)
+        holdToSuppressModifier = v(.holdToSuppressModifier, d.holdToSuppressModifier)
+        hotkeys               = v(.hotkeys, d.hotkeys)
+        soundOnConvert        = v(.soundOnConvert, d.soundOnConvert)
+        flashOnConvert        = v(.flashOnConvert, d.flashOnConvert)
+        autoFixCapitals       = v(.autoFixCapitals, d.autoFixCapitals)
+        expandSnippets        = v(.expandSnippets, d.expandSnippets)
+        learnAfterManualFixes = v(.learnAfterManualFixes, d.learnAfterManualFixes)
+        disableInFullscreen   = v(.disableInFullscreen, d.disableInFullscreen)
+        appBlacklist          = v(.appBlacklist, d.appBlacklist)
+        logHistory            = v(.logHistory, d.logHistory)
+        ruShift6Comma         = v(.ruShift6Comma, d.ruShift6Comma)
+    }
 }
 
 /// One entry in the shadow / recent-conversions review log (FR-21).

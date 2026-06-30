@@ -91,6 +91,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             key: "a", #selector(toggleAuto))
         add(menu, "Shadow-mode (только лог)", on: s.shadowMode,
             key: "s", #selector(toggleShadow))
+        let comma = NSMenuItem(title: "RU: ⇧6 = запятая", action: #selector(toggleRuShift6Comma), keyEquivalent: "")
+        comma.state = s.ruShift6Comma ? .on : .off
+        comma.target = self
+        menu.addItem(comma)
         menu.addItem(.separator())
 
         let recent = NSMenuItem(title: "Недавние конвертации", action: nil, keyEquivalent: "")
@@ -203,6 +207,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(a.informativeText, forType: .string)
         }
+    }
+    @objc private func toggleRuShift6Comma() {
+        coordinator.store.updateSettings { $0.ruShift6Comma.toggle() }
     }
     @objc private func toggleLogHistory() {
         coordinator.store.updateSettings { $0.logHistory.toggle() }
