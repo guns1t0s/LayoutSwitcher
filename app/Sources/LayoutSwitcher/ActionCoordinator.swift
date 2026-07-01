@@ -398,6 +398,7 @@ final class ActionCoordinator: InputCaptureDelegate {
             guard let self, self.keystrokeEpoch == epoch else { return }
             self.layout.replaceSelection(with: converted)
             self.layout.select(to)
+            self.lastContextLayout = to
             self.onConversionApplied?(to, nil)
             self.onChange?()
         }
@@ -423,6 +424,7 @@ final class ActionCoordinator: InputCaptureDelegate {
             guard let self, self.keystrokeEpoch == epoch else { return }
             self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             self.layout.select(to)
+            self.lastContextLayout = to   // keep engine context aligned with the new layout
             self.feedback()
             self.onConversionApplied?(to, converted)
             if inProgress { self.buffer.reset() }
