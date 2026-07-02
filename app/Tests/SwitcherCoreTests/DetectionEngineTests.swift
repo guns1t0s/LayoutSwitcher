@@ -18,6 +18,24 @@ final class DetectionEngineTests: XCTestCase {
         XCTAssertEqual(d.reason, .altIsWord)
     }
 
+    // Regression: the system keyboard layout can lag / be flipped out from under
+    // us, so it must NOT override the actual script of the text. Correct Russian
+    // (cyrillic) typed while the system layout reads EN must be left alone — not
+    // "converted" to itself and flipped, which oscillated the layout every word
+    // ("мигание"). The wrong-layout latin word converts regardless of a stale RU
+    // system layout.
+    func testStaleSystemLayoutDoesNotOscillate() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        // Cyrillic word, system layout desynced to EN → leave it, no flip.
+        let correct = e.evaluate("нужно", typedLayout: .en)
+        XCTAssertFalse(correct.shouldConvert, "correct Russian must not convert on a lagging system layout")
+        // Latin wrong-layout word, system layout desynced to RU → still converts.
+        let wrong = e.evaluate("gjyznm", typedLayout: .ru)   // = понять
+        XCTAssertTrue(wrong.shouldConvert)
+        XCTAssertEqual(wrong.converted, "понять")
+        XCTAssertEqual(wrong.to, .ru)
+    }
+
     // #1 acceptance criterion: never corrupt already-correct text.
     func testLeavesValidEnglishWordAlone() {
         let e = engine(ru: ["привет"], en: ["trust", "fetch"])

@@ -82,18 +82,32 @@ public final class DetectionEngine: @unchecked Sendable {
         let core = token.trimmingCharacters(in: punctuation)
         let lc = core.lowercased()
 
-        // Layout the token currently reads as.
-        guard let current = typedLayout ?? core.dominantLayout else {
+        // Layout the token currently reads as. Trust the SCRIPT of the text
+        // (dominantLayout) over the system keyboard layout: the system layout can
+        // lag or be flipped out from under us, and if we believed it over the
+        // actual cyrillic/latin characters we'd "convert" correct text to itself
+        // (identity) while flipping the layout — a self-sustaining oscillation
+        // that flickers the layout on every word ("мигание"). The system layout is
+        // only a fallback for a token with no letters (script-ambiguous).
+        guard let current = core.dominantLayout ?? typedLayout else {
             return .noop(token, layout: .en, reason: .noLetters)
         }
         let target = current.other
         let altForm = KeyMap.convert(core, to: target)
         let altLC = altForm.lowercased()
+
         // Convert the token, but preserve LEADING/TRAILING sentence punctuation
         // (a real trailing "." must stay "." — not become the letter "ю"). Inner
         // punctuation and word-symbols (@ " etc.) are still converted, so
         // "j,hfnyj"→"обратно" and "\"фтшлщтщкщм"→"@anikonorov" both work.
         let fullConverted = Self.convertPreservingOuterPunct(token, to: target)
+
+        // A "conversion" that changes nothing but the layout is never wanted — it
+        // is the desync no-op above. Guard against it directly, so no path can flip
+        // the layout without actually rewriting text.
+        if fullConverted == token {
+            return .noop(token, layout: current, reason: .typedIsValidWord)
+        }
 
         // --- Hard lexicon gates -------------------------------------------------
         // Never touch user exceptions or words the user reverted by hand.
