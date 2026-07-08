@@ -82,6 +82,22 @@ public final class Store: @unchecked Sendable {
     /// raw typed words must not be persisted). Cleared on quit.
     private var manualFixCounts: [String: Int] = [:]
 
+    /// Rebuild the manual-fix tally from an external source (the opt-in event
+    /// history) so app restarts don't reset learning progress. Only counts below
+    /// the learning threshold are seeded; already-learned words are skipped.
+    /// SEC-2 note: this READS the user-enabled history, it never writes new raw
+    /// words to disk itself.
+    public func seedManualFixTally(_ counts: [String: Int]) {
+        let n = settings.learnAfterManualFixes
+        guard n > 0 else { return }
+        for (word, c) in counts {
+            let w = word.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            guard w.count >= 2, w.contains(where: { $0.isLetter }),
+                  !w.contains(" "), !data.learnedWords.contains(w) else { continue }
+            manualFixCounts[w] = min(c, n - 1)   // next real fix can promote it
+        }
+    }
+
     /// Tally a manually-fixed word; once it crosses `learnAfterManualFixes`,
     /// promote it into the persisted dictionary. Returns true the moment it's learned.
     public func recordManualFix(_ word: String) -> Bool {

@@ -36,6 +36,28 @@ final class DetectionEngineTests: XCTestCase {
         XCTAssertEqual(wrong.to, .ru)
     }
 
+    // Whitelisted acronyms typed in the RU layout convert immediately (ЫЗМ→SPV),
+    // including 2-3 letter ones the OOV length gate would normally skip.
+    func testWhitelistedAcronymConvertsFromCyrillic() {
+        let e = engine(ru: ["привет"], en: [])
+        e.whitelistLatin = ["spv", "qa", "rfi"]
+        XCTAssertEqual(e.evaluate("ЫЗМ").converted, "SPV")
+        XCTAssertTrue(e.evaluate("ЫЗМ").shouldConvert)
+        XCTAssertEqual(e.evaluate("ЙФ").converted, "QA")
+    }
+
+    // FP guard on the whitelist path: if the cyrillic reading is itself a valid
+    // Russian word, lowercase must be left alone (zero-corruption) — but the
+    // ALL-CAPS acronym form still converts (КАШ→RFI wanted even though "каш" is
+    // a real word form).
+    func testWhitelistGuardProtectsRealRussianWords() {
+        let e = engine(ru: ["каш"], en: [])
+        e.whitelistLatin = ["rfi"]
+        XCTAssertFalse(e.evaluate("каш").shouldConvert, "valid RU word must not convert")
+        XCTAssertTrue(e.evaluate("КАШ").shouldConvert, "ALL-CAPS acronym form must convert")
+        XCTAssertEqual(e.evaluate("КАШ").converted, "RFI")
+    }
+
     // #1 acceptance criterion: never corrupt already-correct text.
     func testLeavesValidEnglishWordAlone() {
         let e = engine(ru: ["привет"], en: ["trust", "fetch"])
