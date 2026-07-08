@@ -28,6 +28,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                         layout: layout, context: context, eventLog: eventLog)
         input.delegate = coordinator
 
+        // Restarts used to reset word-learning progress (the manual-fix tally is
+        // memory-only per SEC-2). When the user has the event history enabled,
+        // rebuild the tally from it so repeated ⇧⇧ fixes keep counting toward
+        // learnAfterManualFixes across restarts.
+        if store.settings.logHistory {
+            var counts: [String: Int] = [:]
+            for e in eventLog.all() where e.kind == "doubleShift" && !e.converted.isEmpty {
+                counts[e.converted.lowercased(), default: 0] += 1
+            }
+            store.seedManualFixTally(counts)
+        }
+
         let model = SettingsModel(store: store, coordinator: coordinator)
         settingsWC = SettingsWindowController(model: model)
         menuBar = MenuBarController(coordinator: coordinator, settingsWC: settingsWC)

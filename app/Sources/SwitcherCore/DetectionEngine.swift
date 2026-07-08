@@ -117,10 +117,17 @@ public final class DetectionEngine: @unchecked Sendable {
         }
         // "Always latin" terms: if the latin reading is whitelisted and we are
         // currently cyrillic, swap to latin; if already latin, leave it.
+        // FP guard: when the cyrillic reading is itself a valid Russian word,
+        // converting would corrupt correct text — stand down, UNLESS the token is
+        // ALL-CAPS (acronym style: КАШ→RFI is wanted even though "каш" is a word;
+        // a real Russian word is virtually never typed in all caps mid-chat).
         if current == .ru, whitelistLatin.contains(altLC) {
-            return Decision(shouldConvert: true, from: .ru, to: .en,
-                            original: token, converted: fullConverted,
-                            confidence: 1.0, reason: .whitelistedLatin)
+            let allCaps = core.count > 1 && core.allSatisfy { !$0.isLowercase }
+            if allCaps || !dicts.model(for: .ru).contains(lc) {
+                return Decision(shouldConvert: true, from: .ru, to: .en,
+                                original: token, converted: fullConverted,
+                                confidence: 1.0, reason: .whitelistedLatin)
+            }
         }
         if current == .en, whitelistLatin.contains(lc) {
             return .noop(token, layout: current, reason: .typedIsValidWord)
