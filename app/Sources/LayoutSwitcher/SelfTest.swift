@@ -38,6 +38,9 @@ enum SelfTest {
         check("ghbdtn.", expectConvert: true, expect: "привет.")   // trailing period preserved
         check("kjubhjdfybt", expectConvert: true, expect: "логирование")  // tech word in dict
         check("rjvgjytyns", expectConvert: true, expect: "компоненты")
+        check("gjhzlrt", expectConvert: true, expect: "порядке")     // noun case form (paradigm fill)
+        check("ghjgecnbv", expectConvert: true, expect: "пропустим") // verb 1pl form
+        check("jrnz,hz", expectConvert: true, expect: "октября")     // month genitive
         check("dsltkbk", expectConvert: true, expect: "выделил")   // past tense (paradigm fill)
         check("bnjub", expectConvert: true, expect: "итоги")
         check("rjnjhst", expectConvert: true, expect: "которые")
