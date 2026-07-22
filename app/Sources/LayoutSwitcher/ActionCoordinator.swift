@@ -240,6 +240,14 @@ final class ActionCoordinator: InputCaptureDelegate {
         lastReason = decision.reason.rawValue
         guard decision.shouldConvert else {
             note(word, decision.reason.rawValue)
+            // Ambiguous both-valid tokens are the current blind spot (word valid
+            // in BOTH layouts → left alone). Log them with the alt reading so the
+            // tiebreak can be tuned on real data instead of guesses.
+            if decision.reason == .ambiguousBothValid, let from = word.dominantLayout {
+                log("ambiguous", original: word,
+                    converted: KeyMap.convert(word, to: from.other),
+                    from: from, to: from.other, reason: "both-valid")
+            }
             updateContext(with: word); return false
         }
 
