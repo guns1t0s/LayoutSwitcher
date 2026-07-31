@@ -263,6 +263,10 @@ final class ActionCoordinator: InputCaptureDelegate {
         log("auto", original: word, converted: decision.converted,
             from: decision.from, to: decision.to,
             reason: decision.reason.rawValue, confidence: decision.confidence)
+        // Carry layout-dependent boundary intent into the target layout
+        // ("привет^" typed on EN with the RU-⇧6-comma preference → "привет,").
+        let boundary = CorrectionPlanner.mapBoundary(
+            boundary, to: decision.to, ruShift6Comma: store.settings.ruShift6Comma)
         lastConversion = LastConversion(original: word, converted: decision.converted,
                                         boundary: boundary, layoutBefore: decision.from)
         lastContextLayout = decision.to
@@ -417,6 +421,10 @@ final class ActionCoordinator: InputCaptureDelegate {
         let from = text.dominantLayout ?? layout.currentLayout() ?? .en
         let to = from.other
         let converted = KeyMap.convert(text, to: to)
+        // The trailing boundary is re-typed by the replacement, so carry its
+        // layout intent too ("^" from EN ⇧6 → "," under the RU-comma preference).
+        let boundary = CorrectionPlanner.mapBoundary(
+            boundary, to: to, ruShift6Comma: store.settings.ruShift6Comma)
         let plan = CorrectionPlanner.replace(original: text, with: converted, boundary: boundary)
         // Snapshot BEFORE the async hop. If the user types between the double-⇧
         // gesture and this running, the on-screen word grew but deleteCount is
