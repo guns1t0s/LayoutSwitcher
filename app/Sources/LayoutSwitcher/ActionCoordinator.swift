@@ -440,8 +440,12 @@ final class ActionCoordinator: InputCaptureDelegate {
             self.lastCompleted = LastWord(text: converted, boundary: boundary)
             self.lastConversion = LastConversion(original: text, converted: converted,
                                                  boundary: boundary, layoutBefore: from)
-            // Learn from repeated manual fixes: after N, the word joins the dictionary.
-            if !converted.contains(" "), self.store.recordManualFix(converted) {
+            // Learn from repeated manual fixes: after N, the word joins the
+            // dictionary — but only genuinely NEW vocabulary. Cycling a word back
+            // and forth with ⇧⇧ must not teach its wrong-layout image as a "word"
+            // (that poisoned the lexicon and blocked real conversions).
+            if !converted.contains(" "), self.engine.isLearnable(converted),
+               self.store.recordManualFix(converted) {
                 self.engine.learnedWords = self.store.data.learnedWords
                 self.onWordLearned?(converted)
             }

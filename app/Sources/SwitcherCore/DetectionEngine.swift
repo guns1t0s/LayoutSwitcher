@@ -75,6 +75,23 @@ public final class DetectionEngine: @unchecked Sendable {
     ///   - token: the finished word, exactly as typed.
     ///   - typedLayout: layout known to be active while typing, if any.
     ///   - context: layout of the surrounding text, if known (FR-9).
+    /// Should a manually-fixed word be LEARNED into the dictionary? No, when the
+    /// engine already knows it (dictionary/whitelist/learned) or would convert it
+    /// (i.e. it is the wrong-layout image of a real word). The user cycling a word
+    /// back and forth with ⇧⇧ otherwise teaches garbage like "xnj,s" (the EN-layout
+    /// spelling of "чтобы") as a "word", which then makes the REAL wrong-layout
+    /// token ambiguous and blocks its auto-conversion.
+    public func isLearnable(_ word: String) -> Bool {
+        let d = evaluate(word)
+        if d.shouldConvert { return false }              // wrong-layout image
+        switch d.reason {
+        case .typedIsValidWord, .ambiguousBothValid, .excepted, .whitelistedLatin:
+            return false                                  // already known / conflicted
+        default:
+            return true                                   // genuinely new vocabulary
+        }
+    }
+
     public func evaluate(_ token: String,
                          typedLayout: Layout? = nil,
                          context: Layout? = nil) -> Decision {

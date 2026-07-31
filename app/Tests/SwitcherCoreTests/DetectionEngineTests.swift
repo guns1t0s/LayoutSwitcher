@@ -36,6 +36,16 @@ final class DetectionEngineTests: XCTestCase {
         XCTAssertEqual(wrong.to, .ru)
     }
 
+    // Learning guard: ⇧⇧-cycling must not teach wrong-layout garbage. "xnj,s" is
+    // the EN-layout image of "чтобы" → NOT learnable; "чтобы" itself is already a
+    // dictionary word → not learnable either; a genuinely new token (a name) is.
+    func testIsLearnableRejectsWrongLayoutImagesAndKnownWords() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        XCTAssertFalse(e.isLearnable("xnj,s"), "wrong-layout image of чтобы must not be learned")
+        XCTAssertFalse(e.isLearnable("чтобы"), "dictionary word needs no learning")
+        XCTAssertTrue(e.isLearnable("никоноров"), "new proper name is learnable")
+    }
+
     // Whitelisted acronyms typed in the RU layout convert immediately (ЫЗМ→SPV),
     // including 2-3 letter ones the OOV length gate would normally skip.
     func testWhitelistedAcronymConvertsFromCyrillic() {
