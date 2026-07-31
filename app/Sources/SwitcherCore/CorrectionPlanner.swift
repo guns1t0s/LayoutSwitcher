@@ -12,6 +12,18 @@ public struct ReplacePlan: Equatable {
 
 public enum CorrectionPlanner {
 
+    /// Map a word-boundary character to what the user MEANT in the target layout.
+    /// Deliberately minimal: most boundaries (space, newline, sentence "." / ",")
+    /// are layout-independent and must stay verbatim. The one clear case is "^" —
+    /// it only appears when ⇧6 was pressed on the EN layout, and a user with the
+    /// "RU ⇧6 = comma" preference meant "," there; a conversion to RU should
+    /// carry that intent instead of leaving a stray caret.
+    public static func mapBoundary(_ boundary: Character?, to layout: Layout,
+                                   ruShift6Comma: Bool) -> Character? {
+        if layout == .ru, ruShift6Comma, boundary == "^" { return "," }
+        return boundary
+    }
+
     /// Auto-conversion at a word boundary, absorbing any characters of the NEXT
     /// word already typed in the same wrong layout. The boundary char (space /
     /// newline / tab) is preserved; the extras are re-typed converted.

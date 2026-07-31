@@ -47,6 +47,18 @@ final class CorrectionPlannerTests: XCTestCase {
         XCTAssertEqual(p.insertText, "привет!")
     }
 
+    // "^" only appears from ⇧6 on the EN layout; converting to RU under the
+    // ru-⇧6-comma preference must carry the comma intent. Everything else —
+    // real punctuation, spaces, EN-target conversions, preference off — verbatim.
+    func testMapBoundaryCaretToCommaOnlyForRuWithPreference() {
+        XCTAssertEqual(CorrectionPlanner.mapBoundary("^", to: .ru, ruShift6Comma: true), ",")
+        XCTAssertEqual(CorrectionPlanner.mapBoundary("^", to: .ru, ruShift6Comma: false), "^")
+        XCTAssertEqual(CorrectionPlanner.mapBoundary("^", to: .en, ruShift6Comma: true), "^")
+        XCTAssertEqual(CorrectionPlanner.mapBoundary(".", to: .ru, ruShift6Comma: true), ".")
+        XCTAssertEqual(CorrectionPlanner.mapBoundary(" ", to: .ru, ruShift6Comma: true), " ")
+        XCTAssertNil(CorrectionPlanner.mapBoundary(nil, to: .ru, ruShift6Comma: true))
+    }
+
     func testReplaceWithBoundary() {
         let p = CorrectionPlanner.replace(original: "omw", with: "on my way", boundary: " ")
         XCTAssertEqual(p.deleteCount, 4)            // 3 + space
