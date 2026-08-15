@@ -13,6 +13,7 @@ public enum DetectionReason: String, Sendable {
     case whitelistedLatin        // forced to latin by whitelist
     case suppressed              // hold-to-suppress / global toggle off
     case mixedScript             // token mixes RU+EN letters (mid-word switch) — leave it
+    case mixedRepaired           // mixed token unified into a real word (layout flipped mid-word)
     case ambiguousResolved       // valid both ways, resolved by frequency + context
     case morphology              // OOV, but a plausible inflection of a known stem
 }
@@ -162,6 +163,41 @@ public final class DetectionEngine: @unchecked Sendable {
         let hasRu = core.contains { $0.isCyrillic }
         let hasEn = core.contains { $0.isLatinLetter }
         if hasRu && hasEn {
+            // Normally mojibake (homoglyphs, deliberate mixing) and unsafe to
+            // touch. But the usual cause is benign and repairable: the layout
+            // switched WHILE the word was being typed — after an auto-conversion
+            // flipped it — so the first characters sit in one script and the rest
+            // in the other ("пhbdtn", "Ht,енок"). Unifying the scripts restores
+            // exactly what the user meant, because KeyMap passes through
+            // characters already in the target script: "пhbdtn" → "привет",
+            // "Ht,енок" → "Ребенок".
+            //
+            // Accept the repair only when EXACTLY ONE direction yields a real
+            // dictionary word. That keeps the zero-corruption bar — no n-gram
+            // guessing on genuinely mixed text, which stays untouched.
+            // The repaired core must come out as PURE LETTERS. Otherwise a letter
+            // of one script maps onto punctuation of the other ("iPhoneХ" → the
+            // cyrillic Х becomes "[", and trimming that edge would sneak the token
+            // past a dictionary check on "iphone") and we would corrupt real text.
+            func repaired(_ target: Layout) -> String? {
+                let body = KeyMap.convert(core, to: target)
+                guard body.allSatisfy({ $0.isLetter }) else { return nil }
+                let lc = body.lowercased()
+                guard dicts.model(for: target).contains(lc) || learnedWords.contains(lc) else { return nil }
+                return Self.convertPreservingOuterPunct(token, to: target)
+            }
+            let asRu = repaired(.ru)
+            let asEn = repaired(.en)
+            if let fixed = asRu, asEn == nil {
+                return Decision(shouldConvert: true, from: .en, to: .ru,
+                                original: token, converted: fixed,
+                                confidence: 1.0, reason: .mixedRepaired)
+            }
+            if let fixed = asEn, asRu == nil {
+                return Decision(shouldConvert: true, from: .ru, to: .en,
+                                original: token, converted: fixed,
+                                confidence: 1.0, reason: .mixedRepaired)
+            }
             return .noop(token, layout: current, reason: .mixedScript)
         }
 
