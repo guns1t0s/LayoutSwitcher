@@ -124,6 +124,22 @@ public enum TextFixes {
             (c.isLowercase ? Character(c.uppercased()) : c)
         })
     }
+
+    /// The word immediately preceding the caret in `text` (caret at `caret`),
+    /// i.e. the trailing run of non-whitespace characters. Returns nil when the
+    /// caret sits after whitespace or the run holds no letters — there is then
+    /// nothing meaningful to convert. Used by the manual fix when the typing
+    /// buffer is empty (the user clicked into existing text and pressed ⇧⇧).
+    public static func wordBeforeCaret(in text: String, caret: Int) -> String? {
+        let chars = Array(text)
+        let end = max(0, min(caret, chars.count))
+        guard end > 0 else { return nil }
+        var start = end
+        while start > 0, !chars[start - 1].isWhitespace { start -= 1 }
+        guard start < end else { return nil }
+        let word = String(chars[start..<end])
+        return word.contains(where: { $0.isLetter }) ? word : nil
+    }
 }
 
 // MARK: - Snippets / autoreplace (FR-26)

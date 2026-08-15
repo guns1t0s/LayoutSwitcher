@@ -54,4 +54,16 @@ final class TextToolsTests: XCTestCase {
         XCTAssertEqual(Snippets.expand("API", using: map), "Application Programming Interface")
         XCTAssertNil(Snippets.expand("xyz", using: map))
     }
+
+    // Manual fix after a click: the word right before the caret is what the user
+    // means. Whitespace-delimited, must contain a letter, nil when there is none.
+    func testWordBeforeCaret() {
+        XCTAssertEqual(TextFixes.wordBeforeCaret(in: "привет ghbdtn", caret: 13), "ghbdtn")
+        XCTAssertEqual(TextFixes.wordBeforeCaret(in: "ghbdtn,", caret: 7), "ghbdtn,")   // punctuation kept
+        XCTAssertEqual(TextFixes.wordBeforeCaret(in: "one two", caret: 3), "one")       // caret mid-text
+        XCTAssertNil(TextFixes.wordBeforeCaret(in: "привет ", caret: 7))                // after a space
+        XCTAssertNil(TextFixes.wordBeforeCaret(in: "12 34", caret: 5))                  // no letters
+        XCTAssertNil(TextFixes.wordBeforeCaret(in: "", caret: 0))
+        XCTAssertEqual(TextFixes.wordBeforeCaret(in: "abc", caret: 99), "abc")          // caret clamped
+    }
 }

@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import SwitcherCore
 
 /// Thin Accessibility helpers: read/replace the selection (REL-5), find the
 /// caret rectangle (caret overlay), and detect fullscreen (FR-31). Every call
@@ -80,6 +81,13 @@ enum AXText {
     /// FR-31: is the frontmost app in *native* fullscreen? Only the AX
     /// fullscreen flag is used — a window merely sized to the screen (maximized)
     /// must NOT count, or conversion would be suppressed for normal full-window work.
+    /// The word right before the caret in the focused field (nil if unreadable).
+    /// Lets the manual fix work after a click, when the typing buffer is empty.
+    static func wordBeforeCaret() -> String? {
+        guard let (text, caret) = focusedValueAndCaret() else { return nil }
+        return TextFixes.wordBeforeCaret(in: text, caret: caret)
+    }
+
     static func isFrontmostFullscreen() -> Bool {
         guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return false }
         let app = AXUIElementCreateApplication(pid)
