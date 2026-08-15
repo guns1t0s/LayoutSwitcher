@@ -133,6 +133,36 @@ final class DetectionEngineTests: XCTestCase {
         XCTAssertEqual(d.reason, .mixedScript)
     }
 
+    // The layout can flip mid-word (right after an auto-conversion switched it),
+    // leaving the start of the word in one script and the rest in the other.
+    // Unifying the scripts restores the intended word; accepted only when exactly
+    // one direction yields a real dictionary word.
+    func testMixedScriptRepairedWhenOneDirectionIsAWord() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        let a = e.evaluate("пhbdtn")            // "п" (RU) + "hbdtn" (EN)
+        XCTAssertTrue(a.shouldConvert)
+        XCTAssertEqual(a.converted, "привет")
+        XCTAssertEqual(a.reason, .mixedRepaired)
+        XCTAssertEqual(a.to, .ru)
+
+        let b = e.evaluate("Ht,енок")           // "Ht," (EN) + "енок" (RU)
+        XCTAssertEqual(b.converted, "Ребенок")
+
+        XCTAssertEqual(e.evaluate("пhbdtn.").converted, "привет.")   // outer punct kept
+    }
+
+    // Repair must not fire when it cannot be trusted: neither direction is a word,
+    // or a letter of one script maps onto punctuation of the other (which trimming
+    // would hide — "iPhoneХ" must never become "iPhone[").
+    func testMixedScriptRepairRefusesUnsafeCases() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        for token in ["прhbdtn", "abвгд", "iPhoneХ", "ghbdtnю"] {
+            let d = e.evaluate(token)
+            XCTAssertFalse(d.shouldConvert, "\(token) must be left alone")
+            XCTAssertEqual(d.reason, .mixedScript)
+        }
+    }
+
     func testLearnedWordTreatedAsDictionary() {
         let e = engine(ru: [], en: [])
         XCTAssertFalse(e.evaluate("dhjlt").shouldConvert)   // unknown → leave it

@@ -279,8 +279,12 @@ final class ActionCoordinator: InputCaptureDelegate {
             // fast (REL-2).
             let plan = CorrectionPlanner.autoConvertSwallow(
                 original: word, converted: decision.converted, boundary: boundary)
-            layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
+            // Switch the layout FIRST: the replacement inserts a Unicode string, so
+            // it is layout-independent, while every event we post before the switch
+            // widens the window in which the user's next keystroke still lands in
+            // the old layout — that is what leaves half a word in each script.
             layout.select(decision.to)
+            layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             let d = decision
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -304,8 +308,8 @@ final class ActionCoordinator: InputCaptureDelegate {
             let plan = CorrectionPlanner.autoConvert(
                 original: word, converted: decision.converted, boundary: boundary,
                 extras: self.buffer.word, extrasTo: decision.to)
+            self.layout.select(decision.to)      // first — see the swallow path
             self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
-            self.layout.select(decision.to)
             if !plan.convertedExtras.isEmpty { self.buffer.replaceWord(plan.convertedExtras) }
             self.feedback()
             self.onConversionApplied?(decision.to, decision.converted)
