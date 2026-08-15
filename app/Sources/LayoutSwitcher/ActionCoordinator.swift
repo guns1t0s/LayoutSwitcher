@@ -383,6 +383,15 @@ final class ActionCoordinator: InputCaptureDelegate {
             logFix(branch: "fix-last", text: last.text, interval: interval)
             fixWord(last.text, boundary: last.boundary, inProgress: false); return
         }
+        // 4) Nothing typed and nothing selected — but the caret may still sit right
+        // after a word the user means (they clicked into existing text, which wipes
+        // the typing buffer). Read that word via AX and convert it. This used to be
+        // a dead end ("phantom" gestures in the history).
+        if let w = AXText.wordBeforeCaret() {
+            note(w, "fix-caret")
+            logFix(branch: "fix-caret", text: w, interval: interval)
+            fixWord(w, boundary: nil, inProgress: false); return
+        }
         // Nothing to fix. We deliberately do NOT probe the clipboard: a Cmd+C/Cmd+V
         // round-trip in Electron/chat apps grabbed and pasted the user's REAL
         // clipboard (a URL → an auto-link) — corruption far worse than a miss.
