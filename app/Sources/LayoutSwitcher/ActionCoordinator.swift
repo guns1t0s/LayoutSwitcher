@@ -212,41 +212,40 @@ final class ActionCoordinator: InputCaptureDelegate {
             }
         }
 
-        guard store.settings.autoConvertEnabled else {
-            note(word, "off"); updateContext(with: word); return false
+        // A guard that silently stands down is indistinguishable from a bug from
+        // the outside ("it just stopped converting"), so record which one fired.
+        func blocked(_ reason: String, keepContext: Bool = true) -> Bool {
+            note(word, reason)
+            log("blocked", original: word, reason: reason)
+            if keepContext { updateContext(with: word) }
+            return false
         }
-        guard !suppressActive else {
-            note(word, "fn-suppress"); updateContext(with: word); return false
-        }
-        guard !fullscreenActive else {
-            note(word, "fullscreen"); updateContext(with: word); return false
-        }
+        guard store.settings.autoConvertEnabled else { return blocked("off") }
+        guard !suppressActive else { return blocked("fn-suppress") }
+        guard !fullscreenActive else { return blocked("fullscreen") }
         if layout.isInputMethodActive() {                                         // REL-4
-            note(word, "ime"); return false // composing via an IME — not real RU/EN text
+            return blocked("ime", keepContext: false)   // IME composition isn't real RU/EN text
         }
-        if context.isSecureInput {                                                // SEC-4
-            note(word, "secure"); updateContext(with: word); return false
-        }
-        if domainBlocked() {                                                       // REL-6
-            note(word, "domain"); updateContext(with: word); return false
-        }
+        if context.isSecureInput { return blocked("secure") }                     // SEC-4
+        if domainBlocked() { return blocked("domain") }                           // REL-6
         let rule = effectiveRule(for: context.frontmostBundleID)                   // FR-32 / per-app
-        if rule.mode == .off {
-            note(word, "app-off"); updateContext(with: word); return false
-        }
+        if rule.mode == .off { return blocked("app-off") }
 
         let typed = layout.currentLayout()
         let decision = engine.evaluate(word, typedLayout: typed, context: lastContextLayout)
         lastReason = decision.reason.rawValue
         guard decision.shouldConvert else {
             note(word, decision.reason.rawValue)
-            // Ambiguous both-valid tokens are the current blind spot (word valid
-            // in BOTH layouts → left alone). Log them with the alt reading so the
-            // tiebreak can be tuned on real data instead of guesses.
-            if decision.reason == .ambiguousBothValid, let from = word.dominantLayout {
-                log("ambiguous", original: word,
+            // Log the skips that could plausibly have been conversions, with the
+            // alt reading and the deciding reason. `typedIsValidWord` is ~70% of
+            // all boundaries (correct text, working as intended) and would drown
+            // the log, so it is excluded; everything else is a candidate miss and
+            // is what makes "why didn't it convert" answerable from data.
+            if decision.reason != .typedIsValidWord, let from = word.dominantLayout {
+                log("skip", original: word,
                     converted: KeyMap.convert(word, to: from.other),
-                    from: from, to: from.other, reason: "both-valid")
+                    from: from, to: from.other, reason: decision.reason.rawValue,
+                    confidence: decision.confidence)
             }
             updateContext(with: word); return false
         }
@@ -464,8 +463,10 @@ final class ActionCoordinator: InputCaptureDelegate {
             // Learn from repeated manual fixes: after N, the word joins the
             // dictionary — but only genuinely NEW vocabulary. Cycling a word back
             // and forth with ⇧⇧ must not teach its wrong-layout image as a "word"
-            // (that poisoned the lexicon and blocked real conversions).
-            if !converted.contains(" "), self.engine.isLearnable(converted),
+            // (that poisoned the lexicon and blocked real conversions). A fix of a
+            // word still being typed is a FRAGMENT by definition ("тер", "изнес",
+            // "алер" all got learned that way) — never learn from those either.
+            if !inProgress, !converted.contains(" "), self.engine.isLearnable(converted),
                self.store.recordManualFix(converted) {
                 self.engine.learnedWords = self.store.data.learnedWords
                 self.onWordLearned?(converted)

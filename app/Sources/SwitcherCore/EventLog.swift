@@ -126,6 +126,9 @@ public final class EventLog: @unchecked Sendable {
         switch e.kind {
         case "phantom":  body = "⇧⇧ впустую (нечего конвертировать)"
         case "ambiguous": body = "неоднозначно \"\(e.original)\" (вариант \"\(e.converted)\") - не тронуто"
+        case "skip":     body = "пропуск \"\(e.original)\" (вариант \"\(e.converted)\") [\(e.reason) \(String(format: "%.2f", e.confidence))]"
+        case "blocked" where !e.original.isEmpty:
+            body = "гард \(e.reason): \"\(e.original)\" не обработано"
         case "blocked":  body = "⇧⇧ заблокировано: \(e.reason)"
         case "undo":     body = "ОТКАТ \"\(e.original)\" → \"\(e.converted)\""
         case "doubleShift": body = "⇧⇧ \(e.branch): \"\(e.original)\" → \"\(e.converted)\""
