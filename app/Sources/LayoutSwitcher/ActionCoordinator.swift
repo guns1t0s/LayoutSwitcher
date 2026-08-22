@@ -75,6 +75,47 @@ final class ActionCoordinator: InputCaptureDelegate {
         syncFromStore()
     }
 
+    // MARK: - layout switch / keystroke alignment
+
+    /// The layout we last selected ourselves, and when. See `aligned(_:)`.
+    private var pendingLayout: Layout?
+    private var pendingLayoutAt: TimeInterval = 0
+
+    /// Select a layout AND remember it, so the next keystrokes can be interpreted
+    /// the way the receiving app will interpret them (see `aligned(_:)`).
+    private func switchLayout(_ l: Layout) {
+        layout.select(l)
+        pendingLayout = l
+        pendingLayoutAt = ProcessInfo.processInfo.systemUptime
+    }
+
+    /// Re-interpret a keystroke's characters in the layout that is ACTUALLY active.
+    ///
+    /// `keyboardGetUnicodeString` resolves a key with the layout attached to the
+    /// event, which can disagree with the layout the receiving app renders with —
+    /// measured in the wild for seconds at a time after a switch. The screen then
+    /// shows "abkmnh" while our buffer holds "фильтр", so the engine sees
+    /// perfectly correct Russian and leaves it alone: conversion looks dead after
+    /// every switch, which is exactly the reported symptom.
+    ///
+    /// The system's current input source is what the app renders with, and it
+    /// reads back immediately in-process (verified), so anchor on it and re-map
+    /// the characters by physical-key equivalence. A disagreement can only mean
+    /// stale event characters — when they already agree this is a no-op, and if
+    /// the layout is unreadable (a third layout, an IME) nothing is touched.
+    private func aligned(_ chars: String) -> String {
+        guard let script = chars.dominantLayout else { return chars }   // digits/punct
+        if let now = layout.currentLayout() {
+            return script == now ? chars : KeyMap.convert(chars, to: now)
+        }
+        // TIS unreadable: fall back to the layout we ourselves selected last.
+        if let want = pendingLayout,
+           ProcessInfo.processInfo.systemUptime - pendingLayoutAt < K.layoutSkewWindow {
+            return script == want ? chars : KeyMap.convert(chars, to: want)
+        }
+        return chars
+    }
+
     /// Run `body` once the gesture modifiers (⇧/⌃/⌥/⌘) have PHYSICALLY released,
     /// polling the live hardware flag state. Synthetic Backspaces posted while a
     /// modifier is still down are seen as e.g. Shift+Backspace by apps that read
@@ -157,7 +198,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         // Space / punctuation boundaries take the SYNCHRONOUS swallow path: if the
         // finished word converts, we drop this boundary keystroke and re-insert it
         // ourselves, so no async gap exists for the next keystroke to race.
-        for c in chars {
+        for c in aligned(chars) {
             let step = buffer.input(c)
             if let word = step.completedWord, onBoundary(word, step.boundary, canSwallow: true) {
                 return true
@@ -244,7 +285,8 @@ final class ActionCoordinator: InputCaptureDelegate {
             if decision.reason != .typedIsValidWord, let from = word.dominantLayout {
                 log("skip", original: word,
                     converted: KeyMap.convert(word, to: from.other),
-                    from: from, to: from.other, reason: decision.reason.rawValue,
+                    from: from, to: from.other,
+                    reason: "\(decision.reason.rawValue)/tis:\(layout.currentLayout()?.short ?? "?")",
                     confidence: decision.confidence)
             }
             updateContext(with: word); return false
@@ -282,7 +324,7 @@ final class ActionCoordinator: InputCaptureDelegate {
             // it is layout-independent, while every event we post before the switch
             // widens the window in which the user's next keystroke still lands in
             // the old layout — that is what leaves half a word in each script.
-            layout.select(decision.to)
+            switchLayout(decision.to)
             layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             let d = decision
             DispatchQueue.main.async { [weak self] in
@@ -307,7 +349,7 @@ final class ActionCoordinator: InputCaptureDelegate {
             let plan = CorrectionPlanner.autoConvert(
                 original: word, converted: decision.converted, boundary: boundary,
                 extras: self.buffer.word, extrasTo: decision.to)
-            self.layout.select(decision.to)      // first — see the swallow path
+            self.switchLayout(decision.to)       // first — see the swallow path
             self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             if !plan.convertedExtras.isEmpty { self.buffer.replaceWord(plan.convertedExtras) }
             self.feedback()
@@ -421,7 +463,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         afterModifiersRelease { [weak self] in
             guard let self, self.keystrokeEpoch == epoch else { return }
             self.layout.replaceSelection(with: converted)
-            self.layout.select(to)
+            self.switchLayout(to)
             self.lastContextLayout = to
             self.onConversionApplied?(to, nil)
             self.onChange?()
@@ -451,7 +493,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         afterModifiersRelease { [weak self] in
             guard let self, self.keystrokeEpoch == epoch else { return }
             self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
-            self.layout.select(to)
+            self.switchLayout(to)
             self.lastContextLayout = to   // keep engine context aligned with the new layout
             self.feedback()
             self.onConversionApplied?(to, converted)
@@ -481,7 +523,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         buffer.reset()
         guard let cur = layout.currentLayout() else { layout.toggle(); onChange?(); return }
         let to = cur.other
-        layout.select(to)
+        switchLayout(to)
         onConversionApplied?(to, nil)
         onChange?()
     }
