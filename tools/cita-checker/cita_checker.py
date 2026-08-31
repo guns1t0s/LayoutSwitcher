@@ -27,7 +27,6 @@ then `playwright install chromium`).
 
 import argparse
 import datetime
-import json
 import os
 import platform
 import random
@@ -156,8 +155,8 @@ def notify(cfg, title, message):
                            capture_output=True)
     except Exception:
         pass
-    token = cfg.telegram_token
-    chat = cfg.telegram_chat
+    token = (cfg.telegram_token or "").strip()
+    chat = (cfg.telegram_chat or "").strip()
     if token and chat:
         try:
             data = urllib.parse.urlencode(
@@ -166,10 +165,15 @@ def notify(cfg, title, message):
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 data=data, timeout=15)
         except Exception as exc:
-            log(f"Telegram notification failed: {exc}")
+            # str(exc) may echo the request URL, bot token included
+            log(f"Telegram notification failed: {type(exc).__name__}")
 
 
 # --- portal navigation -----------------------------------------------------
+
+class ConfigError(RuntimeError):
+    """A configuration problem that retrying can never fix."""
+
 
 class FlowResult:
     def __init__(self, state, message="", offices=None, screenshot=None):
@@ -294,20 +298,27 @@ class Checker:
             page.locator("#txtDesCitado").fill(cfg.name)
         if self.visible(page, "#txtAnnoCitado"):
             if not cfg.year:
-                raise RuntimeError(
+                raise ConfigError(
                     "The form asks for the year of birth: pass --year YYYY")
             page.locator("#txtAnnoCitado").fill(str(cfg.year))
         if self.visible(page, "select#txtPaisNac"):
+            if not cfg.country:
+                raise ConfigError(
+                    "The form asks for your nationality: pass --country / "
+                    "CITA_COUNTRY exactly as the portal spells it")
             sel = page.locator("select#txtPaisNac")
             wanted = norm(cfg.country)
-            for opt in sel.locator("option").all():
-                if wanted in norm(opt.inner_text()):
-                    sel.select_option(value=opt.get_attribute("value"))
-                    break
-            else:
-                raise RuntimeError(
+            options = [(o.get_attribute("value"), norm(o.inner_text()))
+                       for o in sel.locator("option").all()]
+            # exact match first so e.g. RUSIA never picks BIELORRUSIA
+            value = next((v for v, t in options if t == wanted), None)
+            if value is None:
+                value = next((v for v, t in options if wanted in t), None)
+            if value is None:
+                raise ConfigError(
                     f"Country '{cfg.country}' not found in the #txtPaisNac "
                     "list; pass --country exactly as the portal spells it")
+            sel.select_option(value=value)
 
     def fill_phone_form(self, page):
         # This data is only used to advance to the slots screen; nothing is
@@ -378,17 +389,22 @@ class Checker:
                     return FlowResult(S_NO_CITAS)
                 if state == S_SLOTS:
                     shot = self.dump(page, "slots")
-                    hold_open = cfg.keep_open
+                    hold_open = cfg.headful and cfg.keep_open
                     if cfg.headful:
-                        log(">>> Slots visible — the browser window stays "
-                            "open. Book the cita there, then press Enter "
-                            "here to continue.")
                         notify(cfg, "Cita previa: HAY CITAS",
                                "Book it in the open browser window NOW")
-                        try:
-                            input()
-                        except EOFError:
-                            pass
+                        if hold_open:
+                            log(">>> Slots visible — the browser window "
+                                "stays open (--keep-open). Book the cita "
+                                "there.")
+                        else:
+                            log(">>> Slots visible — book the cita in the "
+                                "browser window, then press Enter here to "
+                                "continue.")
+                            try:
+                                input()
+                            except EOFError:
+                                pass
                     return FlowResult(S_SLOTS, screenshot=shot)
                 if state == S_CAPTCHA:
                     if cfg.headful and self.wait_out_captcha(page):
@@ -406,8 +422,10 @@ class Checker:
                     self.click_continue(page, ["#btnEnviar"])
                 elif state == S_OFFICE:
                     if collect_offices and office_value is None:
-                        return FlowResult(S_OFFICE,
-                                          offices=self.office_options(page))
+                        offices = self.office_options(page)
+                        if not offices:
+                            return FlowResult(S_UNKNOWN, "empty office list")
+                        return FlowResult(S_OFFICE, offices=offices)
                     if office_value is None:
                         opts = self.office_options(page)
                         if not opts:
@@ -429,7 +447,9 @@ class Checker:
                     return FlowResult(
                         S_UNKNOWN,
                         f"unrecognized page (dump: {shot})")
-            return FlowResult(S_UNKNOWN, "too many steps without a verdict")
+            shot = self.dump(page, "stalled")
+            return FlowResult(
+                S_UNKNOWN, f"too many steps without a verdict (dump: {shot})")
         finally:
             if not (cfg.headful and hold_open):
                 context.close()
@@ -460,7 +480,12 @@ class Checker:
 
 
 def check_once(cfg, browser):
-    """Run one full availability check. Returns True iff slots were found."""
+    """Run one full availability check.
+
+    Returns (found, conclusive): found is True iff slots were seen;
+    conclusive is True iff at least one flow reached a definite verdict
+    (slots, or an explicit no-citas page) rather than captcha/block/drift.
+    """
     checker = Checker(cfg, browser)
     tramites = checker.resolve_tramites()
     patterns = [re.compile(p, re.I) for p in cfg.tramites]
@@ -476,9 +501,24 @@ def check_once(cfg, browser):
         log("No trámite matched your filters. Available trámites:")
         for v, t in tramites:
             log(f"  [{v}] {t}")
-        raise RuntimeError("no matching trámite; adjust --tramite")
+        raise ConfigError("no matching trámite; adjust --tramite")
 
     found_any = False
+    conclusive = False
+
+    def digest(tramite, office, res):
+        """Fold one flow outcome into the cycle verdict; abort on a block."""
+        nonlocal found_any, conclusive
+        found_any |= report(cfg, tramite, office, res)
+        conclusive |= res.state in (S_SLOTS, S_NO_CITAS)
+        if res.state == S_BLOCKED and not found_any:
+            # Stop hammering a rate-limited portal; the caller's backoff
+            # will space out the next attempt.
+            raise RuntimeError(
+                "portal blocked/rate-limited this IP; aborting the cycle: "
+                + (res.message or ""))
+        return res.state == S_BLOCKED
+
     for value, text in targets:
         log(f"Checking trámite [{value}] {text}")
         result = checker.run_flow(value, collect_offices=True)
@@ -498,16 +538,16 @@ def check_once(cfg, browser):
             for ov, ot in offices:
                 log(f"  office: {ot}")
                 sub = checker.run_flow(value, office_value=ov)
-                found_any |= report(cfg, text, ot, sub)
-                if sub.state == S_SLOTS and cfg.stop_on_first:
-                    return True
+                blocked = digest(text, ot, sub)
+                if blocked or (sub.state == S_SLOTS and cfg.stop_on_first):
+                    return found_any, conclusive
                 human_pause(2.0, 5.0)
         else:
-            found_any |= report(cfg, text, None, result)
-            if result.state == S_SLOTS and cfg.stop_on_first:
-                return True
+            blocked = digest(text, None, result)
+            if blocked or (result.state == S_SLOTS and cfg.stop_on_first):
+                return found_any, conclusive
         human_pause(2.0, 5.0)
-    return found_any
+    return found_any, conclusive
 
 
 def report(cfg, tramite, office, result):
@@ -522,7 +562,8 @@ def report(cfg, tramite, office, result):
         log(f"Book NOW (manually): {cfg.base_url}/citar?p={cfg.province_code}"
             "&locale=es")
         log("=" * 60)
-        notify(cfg, "Cita previa: HAY CITAS", msg)
+        if not cfg.headful:  # headful mode already notified inside run_flow
+            notify(cfg, "Cita previa: HAY CITAS", msg)
         return True
     if result.state == S_NO_CITAS:
         log(f"  no slots{where} (portal says: no hay citas disponibles)")
@@ -567,8 +608,9 @@ def build_parser():
                         "(or env CITA_NAME)")
     p.add_argument("--year", default=env("CITA_YEAR"),
                    help="year of birth (some trámites ask for it)")
-    p.add_argument("--country", default=env("CITA_COUNTRY", "RUSIA"),
-                   help="country of nationality as the portal spells it")
+    p.add_argument("--country", default=env("CITA_COUNTRY"),
+                   help="country of nationality as the portal spells it "
+                        "(e.g. RUSIA); required when the form asks for it")
     p.add_argument("--office", default=env("CITA_OFFICE"), metavar="REGEX",
                    help="only check offices matching this regex "
                         "(default: all)")
@@ -582,7 +624,8 @@ def build_parser():
                    help="seconds between checks (keep >= 120 to avoid bans)")
     p.add_argument("--once", action="store_true",
                    help="run a single check and exit (exit code 0 = slots "
-                        "found, 1 = none, 2 = error)")
+                        "found, 1 = confirmed none, 2 = error or "
+                        "inconclusive: captcha/blocked/unrecognized page)")
     p.add_argument("--headful", action="store_true",
                    help="show the browser window (lets you solve captchas "
                         "and book on the spot)")
@@ -591,8 +634,12 @@ def build_parser():
     p.add_argument("--proxy", default=env("CITA_PROXY"),
                    help="proxy server, e.g. http://user:pass@host:port "
                         "(the portal blocks most datacenter/VPN IPs)")
-    p.add_argument("--debug-dir", default="cita-debug",
-                   help="directory for screenshots/HTML dumps")
+    p.add_argument("--debug-dir",
+                   default=os.path.join(
+                       os.path.dirname(os.path.abspath(__file__)),
+                       "cita-debug"),
+                   help="directory for screenshots/HTML dumps (kept next to "
+                        "the script so its .gitignore covers it)")
     p.add_argument("--telegram-token", default=env("TELEGRAM_BOT_TOKEN"))
     p.add_argument("--telegram-chat", default=env("TELEGRAM_CHAT_ID"))
     p.add_argument("--no-stop-on-first", dest="stop_on_first",
@@ -614,6 +661,11 @@ def finalize_config(args):
         args.base_url = f"{BASE_HOST}/{path}"
     args.base_url = args.base_url.rstrip("/")
     args.tramites = args.tramite or DEFAULT_TRAMITES
+    for pat in args.tramites + ([args.office] if args.office else []):
+        try:
+            re.compile(pat, re.I)
+        except re.error as exc:
+            sys.exit(f"Invalid regex {pat!r}: {exc}")
     if not args.list_tramites:
         missing = [n for n, v in (("--doc", args.doc), ("--name", args.name))
                    if not v]
@@ -636,30 +688,65 @@ def main():
         "args": ["--disable-blink-features=AutomationControlled"],
     }
     if cfg.proxy:
-        launch_kwargs["proxy"] = {"server": cfg.proxy}
+        # Playwright strips credentials embedded in the server URL, so
+        # split user:pass out into the separate proxy fields.
+        u = urllib.parse.urlsplit(cfg.proxy)
+        if u.username:
+            server = f"{u.scheme}://{u.hostname}"
+            if u.port:
+                server += f":{u.port}"
+            launch_kwargs["proxy"] = {
+                "server": server,
+                "username": urllib.parse.unquote(u.username),
+                "password": urllib.parse.unquote(u.password or ""),
+            }
+        else:
+            launch_kwargs["proxy"] = {"server": cfg.proxy}
+
+    def hold_window_open():
+        # The browser dies when the sync_playwright block exits, so honoring
+        # --keep-open means blocking here, inside it.
+        if cfg.headful and cfg.keep_open:
+            log("--keep-open: the browser window stays open; press Enter "
+                "here to close it and exit.")
+            try:
+                input()
+            except EOFError:
+                pass
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(**launch_kwargs)
 
         if cfg.list_tramites:
             checker = Checker(cfg, browser)
-            for value, text in checker.resolve_tramites():
+            try:
+                tramites = checker.resolve_tramites()
+            except (PWError, RuntimeError) as exc:
+                log(f"Could not fetch the trámite list: {exc}")
+                sys.exit(2)
+            for value, text in tramites:
                 print(f"[{value}] {text}")
             return
 
         errors_in_row = 0
         while True:
             try:
-                found = check_once(cfg, browser)
+                found, conclusive = check_once(cfg, browser)
                 errors_in_row = 0
                 if cfg.once:
-                    sys.exit(0 if found else 1)
+                    if found:
+                        hold_window_open()
+                    sys.exit(0 if found else (1 if conclusive else 2))
                 if found and cfg.stop_on_first:
                     log("Slots were found — stopping the watch loop. "
                         "Restart the script to keep watching.")
+                    hold_window_open()
                     return
             except SystemExit:
                 raise
+            except ConfigError as exc:
+                log(f"Configuration error (not retrying): {exc}")
+                sys.exit(2)
             except Exception as exc:
                 errors_in_row += 1
                 log(f"Check failed: {exc}")

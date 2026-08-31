@@ -39,22 +39,23 @@ python cita_checker.py --list-tramites
 ```bash
 python cita_checker.py \
   --doc Y1234567X \
-  --name "OLEG TEPLOV" \
+  --name "NOMBRE APELLIDOS" \
   --country RUSIA
 ```
 
-Разовая проверка (для cron и т.п.; код выхода: 0 — есть слоты, 1 — нет,
-2 — ошибка):
+Разовая проверка (для cron и т.п.; код выхода: 0 — есть слоты,
+1 — подтверждённо нет, 2 — ошибка или проверить не удалось —
+капча/блокировка/незнакомая страница):
 
 ```bash
-python cita_checker.py --once --doc Y1234567X --name "OLEG TEPLOV"
+python cita_checker.py --once --doc Y1234567X --name "NOMBRE APELLIDOS"
 ```
 
 С видимым окном браузера — чтобы решить капчу и **сразу забронировать**,
 когда слоты появятся (рекомендуемый режим):
 
 ```bash
-python cita_checker.py --headful --keep-open --doc Y1234567X --name "OLEG TEPLOV"
+python cita_checker.py --headful --keep-open --doc Y1234567X --name "NOMBRE APELLIDOS"
 ```
 
 Данные можно передавать и через переменные окружения, чтобы не светить их
@@ -78,7 +79,8 @@ python cita_checker.py --headful --keep-open --doc Y1234567X --name "OLEG TEPLOV
 ## Уведомления
 
 Когда слоты найдены: звуковой сигнал + системное уведомление macOS/Linux +
-(опционально) сообщение в Telegram + скриншот страницы в `cita-debug/`.
+(опционально) сообщение в Telegram + скриншот страницы в `cita-debug/`
+(папка создаётся рядом со скриптом и не попадает в git).
 По умолчанию после первой находки цикл останавливается
 (`--no-stop-on-first`, чтобы продолжать).
 
