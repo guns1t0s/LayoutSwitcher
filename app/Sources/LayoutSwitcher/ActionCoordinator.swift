@@ -169,6 +169,23 @@ final class ActionCoordinator: InputCaptureDelegate {
     @discardableResult
     func inputDidKeyDown(keycode: Int64, chars: String, flags: CGEventFlags) -> Bool {
         keystrokeEpoch &+= 1
+        // A ⌘/⌃ chord is a shortcut, not text — its letter must never enter the
+        // word buffer. It did: ⌘C fed "c", and at the next boundary "c" → "с"
+        // (a real dictionary word) CONVERTED, posting a Backspace that ate a real
+        // on-screen character and inserting a stray "с" (after ⌘C + Enter in a
+        // chat, that is a phantom message). ⌘V pastes, ⌘Z undoes, ⌘A selects —
+        // the text under the caret may have changed, so also drop word state and
+        // any pending replacement, exactly like a navigation key.
+        if flags.contains(.maskCommand) || flags.contains(.maskControl) {
+            resetWordState()
+            return false
+        }
+        // ⌥⌫ / ⌘⌫ delete a whole word or line, not one character — the buffer
+        // cannot mirror that, so treat them as a disruption too.
+        if keycode == 51, flags.contains(.maskAlternate) {
+            resetWordState()
+            return false
+        }
         // RU layout: remap ⇧+6 (keycode 22) to a comma — the user's muscle memory
         // puts the comma there. SHIFT only (never hijack ⌘/⌃/⌥+6 shortcuts), and
         // stand down in secure/blacklisted fields like every other intervention.
