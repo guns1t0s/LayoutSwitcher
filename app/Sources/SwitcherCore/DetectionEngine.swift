@@ -14,6 +14,8 @@ public enum DetectionReason: String, Sendable {
     case suppressed              // hold-to-suppress / global toggle off
     case mixedScript             // token mixes RU+EN letters (mid-word switch) — leave it
     case mixedRepaired           // mixed token unified into a real word (layout flipped mid-word)
+    case acronym                 // ALL-CAPS cyrillic token that spells a known English acronym
+    case slipRepaired            // ⇧4 typed where ж was meant ("$"/";" between letters)
     case ambiguousResolved       // valid both ways, resolved by frequency + context
     case morphology              // OOV, but a plausible inflection of a known stem
 }
@@ -86,11 +88,60 @@ public final class DetectionEngine: @unchecked Sendable {
         let d = evaluate(word)
         if d.shouldConvert { return false }              // wrong-layout image
         switch d.reason {
-        case .typedIsValidWord, .ambiguousBothValid, .excepted, .whitelistedLatin:
+        case .typedIsValidWord, .ambiguousBothValid, .excepted, .whitelistedLatin, .acronym, .slipRepaired:
             return false                                  // already known / conflicted
         default:
             return true                                   // genuinely new vocabulary
         }
+    }
+
+    /// Characters a shifted number key produces in either layout. Between two
+    /// letters they are never punctuation — only a slip or a layout artifact.
+    static let shiftSymbols: Set<Character> = ["$", "^", "&", "#", "@", "№", ";", ":", "?", "\""]
+
+    /// True when a shifted-number symbol sits BETWEEN two letters.
+    static func hasInnerSymbol(_ s: String) -> Bool {
+        let c = Array(s)
+        guard c.count >= 3 else { return false }
+        for i in 1..<(c.count - 1) where shiftSymbols.contains(c[i]) {
+            if c[i - 1].isLetter && c[i + 1].isLetter { return true }
+        }
+        return false
+    }
+
+    /// Manual (⇧⇧) conversions go through KeyMap directly; a "$" slip then comes
+    /// out as ";" between two Russian letters ("ye$ty" → "ну;ен"). Between letters
+    /// that is never punctuation — it is the ж that was meant.
+    public static func repairInnerZh(_ s: String) -> String {
+        var c = Array(s)
+        guard c.count >= 3 else { return s }
+        for i in 1..<(c.count - 1) where c[i] == ";" && c[i - 1].isCyrillic && c[i + 1].isCyrillic {
+            c[i] = "ж"
+        }
+        return String(c)
+    }
+
+    /// Read an inner "$" (EN layout) or ";" (RU layout) as the ж it was meant to
+    /// be, returning the Russian token (outer punctuation kept) and its core.
+    /// nil when the token has no such slip.
+    static func repairZhSlip(_ token: String, core: String, current: Layout) -> (token: String, core: String)? {
+        let slip: Character = current == .en ? "$" : ";"
+        let c = Array(core)
+        guard c.count >= 3 else { return nil }
+        var hit = false
+        var fixed = c
+        for i in 1..<(c.count - 1) where c[i] == slip && c[i - 1].isLetter && c[i + 1].isLetter {
+            fixed[i] = current == .en ? ";" : "ж"      // EN: the ж key is ";" → converts to ж
+            hit = true
+        }
+        guard hit else { return nil }
+        let fixedCore = String(fixed)
+        let ruCore = current == .en ? KeyMap.convert(fixedCore, to: .ru) : fixedCore
+        guard ruCore.allSatisfy({ $0.isLetter }) else { return nil }
+        // Re-attach the outer punctuation exactly as typed.
+        guard let r = token.range(of: core) else { return nil }
+        let out = String(token[..<r.lowerBound]) + ruCore + String(token[r.upperBound...])
+        return (out, ruCore)
     }
 
     public func evaluate(_ token: String,
@@ -201,6 +252,21 @@ public final class DetectionEngine: @unchecked Sendable {
             return .noop(token, layout: current, reason: .mixedScript)
         }
 
+        // --- ALL-CAPS acronym typed in the RU layout -----------------------------
+        // Short acronyms never reach the n-gram path (tooShort), so "СУЩ" stayed
+        // "СУЩ" instead of "CEO" and was fixed by hand every time. Caps-only on
+        // purpose: lowercase twins sit next to real Russian typos ("ешу"~"еду"),
+        // while nobody types a Russian word in all caps mid-sentence except an
+        // abbreviation — and those are protected (acronymsRU) and pre-gated.
+        if current == .ru, core.count >= 2, core.count <= 8,
+           core.allSatisfy({ ($0.isLetter && $0.isUppercase) || $0.isNumber }),
+           core.filter({ $0.isLetter }).count >= 2,
+           dicts.acronymsEN.contains(altLC), !dicts.acronymsRU.contains(lc) {
+            return Decision(shouldConvert: true, from: .ru, to: .en,
+                            original: token, converted: fullConverted,
+                            confidence: 1.0, reason: .acronym)
+        }
+
         let curModel = dicts.model(for: current)
         let altModel = dicts.model(for: target)
 
@@ -223,6 +289,20 @@ public final class DetectionEngine: @unchecked Sendable {
                                 confidence: 1.0, reason: .altIsWord)
             }
         }
+        // --- Habitual slip: ⇧4 where ж was meant ----------------------------------
+        // The history shows it again and again: "nfr$t" (также), "yf$bvf" (нажима),
+        // "ye$ty" (нужен) on the EN layout, "ну;но" (нужно) on the RU one — ⇧4 gives
+        // "$" / ";" instead of the ж key. A symbol between two letters is never real
+        // punctuation, so when reading it as ж yields a Russian word, that word is
+        // what was meant. Without this the EN form converted to garbage ("ну;ен")
+        // and the RU form was even flipped to "ye$yj" by the n-gram path.
+        if let fixed = Self.repairZhSlip(token, core: core, current: current),
+           dicts.model(for: .ru).contains(fixed.core.lowercased()) || learnedWords.contains(fixed.core.lowercased()) {
+            return Decision(shouldConvert: true, from: current, to: .ru,
+                            original: token, converted: fixed.token,
+                            confidence: 1.0, reason: .slipRepaired)
+        }
+
         let curIsWord = curModel.contains(lc) || learnedWords.contains(lc)
         let altIsWord = altModel.contains(altLC) || learnedWords.contains(altLC)
 
@@ -253,6 +333,12 @@ public final class DetectionEngine: @unchecked Sendable {
         // --- Out-of-vocabulary: character n-gram margin -------------------------
         if core.letterCount < config.minWordLength {
             return .noop(token, layout: current, reason: .tooShort)
+        }
+        // A real word never carries a shifted-number symbol between two letters
+        // ("ye$yj", "так;е"). If that is what converting produces, the token is not a
+        // wrong-layout word — refuse before the n-gram gets a vote on garbage.
+        if Self.hasInnerSymbol(altForm) {
+            return .noop(token, layout: current, reason: .belowThreshold)
         }
         var margin = altModel.score(altLC) - curModel.score(lc)
         // Context nudges the margin but cannot, alone, cross the threshold.
