@@ -9,13 +9,24 @@ public final class Dictionaries: @unchecked Sendable {
     /// word → 1-based frequency rank (lower = more common). Empty if no list.
     private let ruFreq: [String: Int]
     private let enFreq: [String: Int]
+    /// English acronyms (lowercase) that may be converted from an ALL-CAPS
+    /// cyrillic token (СУЩ → CEO). Pre-gated at build time: each one's cyrillic
+    /// twin contains a letter no Russian word starts with, or was observed as a
+    /// real manual fix — so it cannot be a Russian abbreviation.
+    public let acronymsEN: Set<String>
+    /// Russian abbreviations the user types in caps (УК, БА, ИБ, ЦФА...). Never
+    /// converted by the acronym rule — a runtime backstop to the build-time gate.
+    public let acronymsRU: Set<String>
 
     public init(ru: LanguageModel, en: LanguageModel,
-                ruFreq: [String: Int] = [:], enFreq: [String: Int] = [:]) {
+                ruFreq: [String: Int] = [:], enFreq: [String: Int] = [:],
+                acronymsEN: Set<String> = [], acronymsRU: Set<String> = []) {
         self.ru = ru
         self.en = en
         self.ruFreq = ruFreq
         self.enFreq = enFreq
+        self.acronymsEN = acronymsEN
+        self.acronymsRU = acronymsRU
     }
 
     public func model(for layout: Layout) -> LanguageModel { layout == .ru ? ru : en }
@@ -32,17 +43,21 @@ public final class Dictionaries: @unchecked Sendable {
             ru: LanguageModel(layout: .ru, words: readList("ru_words")),
             en: LanguageModel(layout: .en, words: readList("en_words")),
             ruFreq: rankMap(readList("ru_freq")),
-            enFreq: rankMap(readList("en_freq"))
+            enFreq: rankMap(readList("en_freq")),
+            acronymsEN: Set(readList("en_acronyms").map { $0.lowercased() }),
+            acronymsRU: Set(readList("ru_acronyms").map { $0.lowercased() })
         )
     }
 
     /// For tests / corpus import.
     public static func from(ruWords: [String], enWords: [String],
-                            ruFreq: [String] = [], enFreq: [String] = []) -> Dictionaries {
+                            ruFreq: [String] = [], enFreq: [String] = [],
+                            acronymsEN: [String] = [], acronymsRU: [String] = []) -> Dictionaries {
         Dictionaries(
             ru: LanguageModel(layout: .ru, words: ruWords),
             en: LanguageModel(layout: .en, words: enWords),
-            ruFreq: rankMap(ruFreq), enFreq: rankMap(enFreq)
+            ruFreq: rankMap(ruFreq), enFreq: rankMap(enFreq),
+            acronymsEN: Set(acronymsEN), acronymsRU: Set(acronymsRU)
         )
     }
 
@@ -59,11 +74,15 @@ public final class Dictionaries: @unchecked Sendable {
     private static func readList(_ name: String) -> [String] {
         // Try the SwiftPM resource bundle (dev / tests) then the host app's
         // Resources (packaged .app copies the raw .txt there). Fail-open: empty.
-        let candidates = [
-            Bundle.module.url(forResource: name, withExtension: "txt"),
-            Bundle.main.url(forResource: name, withExtension: "txt"),
-        ]
-        guard let url = candidates.compactMap({ $0 }).first,
+        // Bundle.main FIRST, and Bundle.module only lazily (the `??` autoclosure):
+        // in the packaged .app there is no SwiftPM resource bundle, and merely
+        // touching `Bundle.module` there is a fatalError. The old eager array did
+        // touch it — it only survived because the accessor fell back to a path
+        // baked in at compile time, i.e. the app was silently reading its
+        // dictionaries from the BUILD directory. A toolchain update moved that
+        // directory and the app crashed at launch.
+        guard let url = Bundle.main.url(forResource: name, withExtension: "txt")
+                ?? Bundle.module.url(forResource: name, withExtension: "txt"),
               let text = try? String(contentsOf: url, encoding: .utf8) else {
             return []
         }
