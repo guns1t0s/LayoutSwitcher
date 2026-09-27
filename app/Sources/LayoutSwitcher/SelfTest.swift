@@ -36,6 +36,10 @@ enum SelfTest {
         check("lheubt", expectConvert: true, expect: "другие")
         check("rjulf", expectConvert: true, expect: "когда")
         check("ghbdtn.", expectConvert: true, expect: "привет.")   // trailing period preserved
+        check("СУЩ", expectConvert: true, expect: "CEO")            // caps acronym (bundled list)
+        check("УК", expectConvert: false)                            // Russian abbreviation kept
+        check("ну;но", expectConvert: true, expect: "нужно")         // ⇧4-for-ж slip
+        check("цуи", expectConvert: true, expect: "web")             // short EN word
         check("kjubhjdfybt", expectConvert: true, expect: "логирование")  // tech word in dict
         check("rjvgjytyns", expectConvert: true, expect: "компоненты")
         check("gjhzlrt", expectConvert: true, expect: "порядке")     // noun case form (paradigm fill)

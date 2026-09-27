@@ -23,7 +23,7 @@ cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Sources/SwitcherCore/Resources/ru_words.txt" "$APP/Contents/Resources/"
 cp "$ROOT/Sources/SwitcherCore/Resources/en_words.txt" "$APP/Contents/Resources/"
 # Frequency-ordered lists (optional) — used for the ambiguous-word tiebreak.
-for f in ru_freq en_freq; do
+for f in ru_freq en_freq en_acronyms ru_acronyms; do
     [ -f "$ROOT/Sources/SwitcherCore/Resources/$f.txt" ] && \
         cp "$ROOT/Sources/SwitcherCore/Resources/$f.txt" "$APP/Contents/Resources/"
 done
