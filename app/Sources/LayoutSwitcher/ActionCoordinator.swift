@@ -23,6 +23,10 @@ final class ActionCoordinator: InputCaptureDelegate {
     private struct LastWord { let text: String; let boundary: Character? }
     private struct LastConversion { let original: String; let converted: String; let boundary: Character?; let layoutBefore: Layout }
     private var lastCompleted: LastWord?
+    /// The on-screen text of the last AUTO conversion, while it is still the last
+    /// finished word. A ⇧⇧ on exactly that word is the user reverting us — the
+    /// false-positive signal the history must count (logged as "undo").
+    private var lastAutoConverted: String?
     private var lastConversion: LastConversion?
     private var lastContextLayout: Layout?
 
@@ -201,7 +205,21 @@ final class ActionCoordinator: InputCaptureDelegate {
         switch keycode {
         case 51:                                   // Backspace
             disruptionEpoch &+= 1
-            if !buffer.backspace() { resetWordState() }
+            if buffer.backspace() { return false }
+            // The buffer was empty, so this Backspace reached committed text. When it
+            // deletes the boundary right after the last finished word, the caret is
+            // back at that word's end: resume it as the word in progress. Forgetting
+            // it (the old behaviour) turned the common "word, space, oops, ⌫, ⇧⇧" into
+            // a phantom gesture — and in Electron apps, where the caret is not
+            // readable over AX, the user had to select the word with the mouse.
+            if let last = lastCompleted, last.boundary != nil, !last.text.isEmpty {
+                buffer.replaceWord(last.text)
+                lastCompleted = nil
+                lastConversion = nil       // its boundary is gone — undo would misfire
+                lastAutoConverted = nil
+                return false
+            }
+            resetWordState()
             return false
         case 117, 53, 71, 115, 116, 119, 121, 123, 124, 125, 126:  // fwd-del/esc/clear/nav
             resetWordState(); return false
@@ -252,6 +270,7 @@ final class ActionCoordinator: InputCaptureDelegate {
     private func onBoundary(_ word: String, _ boundary: Character?, canSwallow: Bool) -> Bool {
         boundariesSeen += 1
         lastCompleted = LastWord(text: word, boundary: boundary)
+        lastAutoConverted = nil
 
         // FR-26: snippet/autoreplace expansion takes priority over conversion.
         if store.settings.expandSnippets,
@@ -325,9 +344,18 @@ final class ActionCoordinator: InputCaptureDelegate {
         // ("привет^" typed on EN with the RU-⇧6-comma preference → "привет,").
         let boundary = CorrectionPlanner.mapBoundary(
             boundary, to: decision.to, ruShift6Comma: store.settings.ruShift6Comma)
-        lastConversion = LastConversion(original: word, converted: decision.converted,
-                                        boundary: boundary, layoutBefore: decision.from)
         lastContextLayout = decision.to
+        // What the screen holds once the replacement lands. lastCompleted and
+        // lastConversion must describe THAT: they used to keep the typed original,
+        // so a ⇧⇧ right after a wrong auto-conversion re-converted the original into
+        // the very same text — a silent no-op instead of a revert.
+        let applied = { [weak self] in
+            guard let self else { return }
+            self.lastCompleted = LastWord(text: decision.converted, boundary: boundary)
+            self.lastAutoConverted = decision.converted
+            self.lastConversion = LastConversion(original: word, converted: decision.converted,
+                                                 boundary: boundary, layoutBefore: decision.from)
+        }
 
         if canSwallow {
             // SYNCHRONOUS path: the boundary keystroke is about to be swallowed,
@@ -343,6 +371,7 @@ final class ActionCoordinator: InputCaptureDelegate {
             // the old layout — that is what leaves half a word in each script.
             switchLayout(decision.to)
             layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
+            applied()
             let d = decision
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -369,6 +398,7 @@ final class ActionCoordinator: InputCaptureDelegate {
             self.switchLayout(decision.to)       // first — see the swallow path
             self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             if !plan.convertedExtras.isEmpty { self.buffer.replaceWord(plan.convertedExtras) }
+            applied()                            // only once it really landed (may have raced)
             self.feedback()
             self.onConversionApplied?(decision.to, decision.converted)
             self.record(decision, applied: true)
@@ -381,14 +411,17 @@ final class ActionCoordinator: InputCaptureDelegate {
                                   boundary: Character?, layoutAfter: Layout?) {
         let plan = CorrectionPlanner.replace(original: original, with: text, boundary: boundary)
         let snapshot = keystrokeEpoch
+        let before = layout.currentLayout() ?? .en
         DispatchQueue.main.async { [weak self] in
             guard let self, self.keystrokeEpoch == snapshot else { return }
             self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             if let l = layoutAfter { self.layout.select(l) }
+            // Only now is the expansion on screen; if the user typed first the
+            // replacement aborted and the screen still holds the original word.
+            self.lastCompleted = LastWord(text: text, boundary: boundary)
+            self.lastConversion = LastConversion(original: original, converted: text,
+                                                 boundary: boundary, layoutBefore: before)
         }
-        lastCompleted = LastWord(text: text, boundary: boundary)
-        lastConversion = LastConversion(original: original, converted: text,
-                                        boundary: boundary, layoutBefore: layout.currentLayout() ?? .en)
     }
 
     // MARK: - manual correction loop (FR-11/FR-12/FR-13)
@@ -442,6 +475,13 @@ final class ActionCoordinator: InputCaptureDelegate {
         // 3) Last finished word (e.g. "пшерги " + double-⇧ → "github ").
         if let last = lastCompleted {
             note(last.text, "fix-last")
+            if let auto = lastAutoConverted, auto == last.text, let lc = lastConversion {
+                // Reverting an auto-conversion by hand is a false positive, whatever
+                // gesture did it. Log it like undo() so the history stays honest.
+                log("undo", original: lc.converted, converted: lc.original,
+                    from: lc.layoutBefore.other, to: lc.layoutBefore, reason: "⇧⇧-revert")
+            }
+            lastAutoConverted = nil
             logFix(branch: "fix-last", text: last.text, interval: interval)
             fixWord(last.text, boundary: last.boundary, inProgress: false); return
         }
@@ -465,8 +505,9 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// Log a double-⇧ fix, computing the converted form the same way fixWord does.
     private func logFix(branch: String, text: String, interval: TimeInterval) {
         let from = text.dominantLayout ?? layout.currentLayout() ?? .en
+        let converted = KeyMap.convert(text, to: from.other)
         log("doubleShift", branch: branch, original: text,
-            converted: KeyMap.convert(text, to: from.other),
+            converted: from.other == .ru ? DetectionEngine.repairInnerZh(converted) : converted,
             from: from, to: from.other, interval: interval)
     }
 
@@ -475,7 +516,8 @@ final class ActionCoordinator: InputCaptureDelegate {
     private func convertSelection(_ sel: String) {
         let from = sel.dominantLayout ?? layout.currentLayout() ?? .en
         let to = from.other
-        let converted = KeyMap.convert(sel, to: to)
+        var converted = KeyMap.convert(sel, to: to)
+        if to == .ru { converted = DetectionEngine.repairInnerZh(converted) }   // "ye$ty" → "нужен"
         let epoch = keystrokeEpoch
         afterModifiersRelease { [weak self] in
             guard let self, self.keystrokeEpoch == epoch else { return }
@@ -491,7 +533,8 @@ final class ActionCoordinator: InputCaptureDelegate {
     private func fixWord(_ text: String, boundary: Character?, inProgress: Bool) {
         let from = text.dominantLayout ?? layout.currentLayout() ?? .en
         let to = from.other
-        let converted = KeyMap.convert(text, to: to)
+        var converted = KeyMap.convert(text, to: to)
+        if to == .ru { converted = DetectionEngine.repairInnerZh(converted) }   // "$" slip → ж
         // The trailing boundary is re-typed by the replacement, so carry its
         // layout intent too ("^" from EN ⇧6 → "," under the RU-comma preference).
         let boundary = CorrectionPlanner.mapBoundary(
@@ -514,9 +557,17 @@ final class ActionCoordinator: InputCaptureDelegate {
             self.lastContextLayout = to   // keep engine context aligned with the new layout
             self.feedback()
             self.onConversionApplied?(to, converted)
-            if inProgress { self.buffer.reset() }
-            // Enable the cycle: a second double-⇧ swaps the converted form back.
-            self.lastCompleted = LastWord(text: converted, boundary: boundary)
+            if inProgress {
+                // The word is still being typed: keep the CONVERTED prefix in the
+                // buffer, so the letters that follow extend it ("приве"+"т") and the
+                // boundary judges the whole word. Resetting it left the buffer holding
+                // only the tail, and a second ⇧⇧ converted that tail alone.
+                self.buffer.replaceWord(converted)
+                self.lastCompleted = nil
+            } else {
+                // Enable the cycle: a second double-⇧ swaps the converted form back.
+                self.lastCompleted = LastWord(text: converted, boundary: boundary)
+            }
             self.lastConversion = LastConversion(original: text, converted: converted,
                                                  boundary: boundary, layoutBefore: from)
             // Learn from repeated manual fixes: after N, the word joins the
@@ -699,6 +750,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         buffer.reset()
         lastCompleted = nil
         lastConversion = nil
+        lastAutoConverted = nil
         lastContextLayout = nil   // drop stale surrounding-language context (cut random n-gram bias)
     }
 
