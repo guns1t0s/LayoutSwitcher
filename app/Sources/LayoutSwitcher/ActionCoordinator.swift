@@ -23,10 +23,13 @@ final class ActionCoordinator: InputCaptureDelegate {
     private struct LastWord { let text: String; let boundary: Character? }
     private struct LastConversion { let original: String; let converted: String; let boundary: Character?; let layoutBefore: Layout }
     private var lastCompleted: LastWord?
-    /// The on-screen text of the last AUTO conversion, while it is still the last
-    /// finished word. A ⇧⇧ on exactly that word is the user reverting us — the
-    /// false-positive signal the history must count (logged as "undo").
-    private var lastAutoConverted: String?
+    /// Recent AUTO conversions as they now read on screen. A manual fix of exactly
+    /// that text shortly after — by ⇧⇧ on the last word, on a selection or at the
+    /// caret — is the user reverting us: the false-positive signal the history
+    /// must count (logged as "undo"). The ⇧⇧-on-last-word case alone missed the
+    /// "ФТ" → "AN" revert, which was done on a selection.
+    private struct RecentAuto { let converted: String; let original: String; let layoutBefore: Layout; let at: TimeInterval }
+    private var recentAutos: [RecentAuto] = []
     private var lastConversion: LastConversion?
     private var lastContextLayout: Layout?
 
@@ -216,7 +219,6 @@ final class ActionCoordinator: InputCaptureDelegate {
                 buffer.replaceWord(last.text)
                 lastCompleted = nil
                 lastConversion = nil       // its boundary is gone — undo would misfire
-                lastAutoConverted = nil
                 return false
             }
             resetWordState()
@@ -270,7 +272,6 @@ final class ActionCoordinator: InputCaptureDelegate {
     private func onBoundary(_ word: String, _ boundary: Character?, canSwallow: Bool) -> Bool {
         boundariesSeen += 1
         lastCompleted = LastWord(text: word, boundary: boundary)
-        lastAutoConverted = nil
 
         // FR-26: snippet/autoreplace expansion takes priority over conversion.
         if store.settings.expandSnippets,
@@ -352,7 +353,10 @@ final class ActionCoordinator: InputCaptureDelegate {
         let applied = { [weak self] in
             guard let self else { return }
             self.lastCompleted = LastWord(text: decision.converted, boundary: boundary)
-            self.lastAutoConverted = decision.converted
+            self.recentAutos.append(RecentAuto(converted: decision.converted, original: word,
+                                               layoutBefore: decision.from,
+                                               at: ProcessInfo.processInfo.systemUptime))
+            if self.recentAutos.count > 5 { self.recentAutos.removeFirst() }
             self.lastConversion = LastConversion(original: word, converted: decision.converted,
                                                  boundary: boundary, layoutBefore: decision.from)
         }
@@ -475,14 +479,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         // 3) Last finished word (e.g. "пшерги " + double-⇧ → "github ").
         if let last = lastCompleted {
             note(last.text, "fix-last")
-            if let auto = lastAutoConverted, auto == last.text, let lc = lastConversion {
-                // Reverting an auto-conversion by hand is a false positive, whatever
-                // gesture did it. Log it like undo() so the history stays honest.
-                log("undo", original: lc.converted, converted: lc.original,
-                    from: lc.layoutBefore.other, to: lc.layoutBefore, reason: "⇧⇧-revert")
-            }
-            lastAutoConverted = nil
-            logFix(branch: "fix-last", text: last.text, interval: interval)
+                logFix(branch: "fix-last", text: last.text, interval: interval)
             fixWord(last.text, boundary: last.boundary, inProgress: false); return
         }
         // 4) Nothing typed and nothing selected — but the caret may still sit right
@@ -504,6 +501,15 @@ final class ActionCoordinator: InputCaptureDelegate {
 
     /// Log a double-⇧ fix, computing the converted form the same way fixWord does.
     private func logFix(branch: String, text: String, interval: TimeInterval) {
+        // Reverting a recent auto-conversion by hand is a false positive, whatever
+        // gesture did it. Log it like undo() so the history stays honest.
+        let now = ProcessInfo.processInfo.systemUptime
+        let shown = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let i = recentAutos.lastIndex(where: { $0.converted == shown && now - $0.at < 120 }) {
+            let a = recentAutos.remove(at: i)
+            log("undo", original: a.converted, converted: a.original,
+                from: a.layoutBefore.other, to: a.layoutBefore, reason: "manual-revert/\(branch)")
+        }
         let from = text.dominantLayout ?? layout.currentLayout() ?? .en
         let converted = KeyMap.convert(text, to: from.other)
         log("doubleShift", branch: branch, original: text,
@@ -750,7 +756,6 @@ final class ActionCoordinator: InputCaptureDelegate {
         buffer.reset()
         lastCompleted = nil
         lastConversion = nil
-        lastAutoConverted = nil
         lastContextLayout = nil   // drop stale surrounding-language context (cut random n-gram bias)
     }
 
