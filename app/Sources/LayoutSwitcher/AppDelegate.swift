@@ -23,7 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard ensureSingleInstance() else { NSApp.terminate(nil); return }
         NSApp.setActivationPolicy(.accessory)   // menu-bar only (also LSUIElement in Info.plist)
 
-        let dicts = Dictionaries.loadBundled()
+        let dicts = Dictionaries.loadForApp()   // bundled + local personal lexicon
         coordinator = ActionCoordinator(store: store, dictionaries: dicts,
                                         layout: layout, context: context, eventLog: eventLog)
         input.delegate = coordinator
