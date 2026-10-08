@@ -49,6 +49,32 @@ public final class Dictionaries: @unchecked Sendable {
         )
     }
 
+    /// Personal lexicon: words mined from the user's own typing (the opt-in
+    /// switching history). Lives ONLY in Application Support, never in the
+    /// repository — it holds colleagues' names, health terms and slang. One word
+    /// per line; missing file = no personal words.
+    public static let userLexiconFile = "user_ru_words.txt"
+
+    /// Bundled lists plus the user's local lexicon merged into the RU model.
+    /// The app uses this; tests and the selftest use `loadBundled()` so their
+    /// results never depend on what is on this particular machine.
+    public static func loadForApp(directory: URL? = nil) -> Dictionaries {
+        let base = directory ?? Store.defaultDirectory()
+        let url = base.appendingPathComponent(userLexiconFile)
+        let personal = (try? String(contentsOf: url, encoding: .utf8))?
+            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            .filter { !$0.isEmpty } ?? []
+        return Dictionaries(
+            ru: LanguageModel(layout: .ru, words: readList("ru_words") + personal),
+            en: LanguageModel(layout: .en, words: readList("en_words")),
+            ruFreq: rankMap(readList("ru_freq")),
+            enFreq: rankMap(readList("en_freq")),
+            acronymsEN: Set(readList("en_acronyms").map { $0.lowercased() }),
+            acronymsRU: Set(readList("ru_acronyms").map { $0.lowercased() })
+        )
+    }
+
     /// For tests / corpus import.
     public static func from(ruWords: [String], enWords: [String],
                             ruFreq: [String] = [], enFreq: [String] = [],
