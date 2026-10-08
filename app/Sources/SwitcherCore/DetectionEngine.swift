@@ -16,6 +16,8 @@ public enum DetectionReason: String, Sendable {
     case mixedRepaired           // mixed token unified into a real word (layout flipped mid-word)
     case acronym                 // ALL-CAPS cyrillic token that spells a known English acronym
     case slipRepaired            // ⇧4 typed where ж was meant ("$"/";" between letters)
+    case capsGuard               // short ALL-CAPS token: abbreviation-shaped, generic paths stand down
+    case idCode                  // caps letter(s) glued to 5+ digits, typed in RU layout (NIE "Я1185954Ч")
     case ambiguousResolved       // valid both ways, resolved by frequency + context
     case morphology              // OOV, but a plausible inflection of a known stem
 }
@@ -88,7 +90,8 @@ public final class DetectionEngine: @unchecked Sendable {
         let d = evaluate(word)
         if d.shouldConvert { return false }              // wrong-layout image
         switch d.reason {
-        case .typedIsValidWord, .ambiguousBothValid, .excepted, .whitelistedLatin, .acronym, .slipRepaired:
+        case .typedIsValidWord, .ambiguousBothValid, .excepted, .whitelistedLatin, .acronym, .slipRepaired,
+             .capsGuard, .idCode:
             return false                                  // already known / conflicted
         default:
             return true                                   // genuinely new vocabulary
@@ -98,6 +101,33 @@ public final class DetectionEngine: @unchecked Sendable {
     /// Characters a shifted number key produces in either layout. Between two
     /// letters they are never punctuation — only a slip or a layout artifact.
     static let shiftSymbols: Set<Character> = ["$", "^", "&", "#", "@", "№", ";", ":", "?", "\""]
+
+    /// All letters uppercase, at least two of them (a single capital is a sentence start).
+    static func isAllCapsWord(_ s: String) -> Bool {
+        let letters = s.filter { $0.isLetter }
+        return letters.count >= 2 && letters.allSatisfy { $0.isUppercase }
+    }
+
+    /// "Я1185954Ч" → "Z1185954X": 1-2 caps cyrillic letters, 5-9 digits, 0-2 caps
+    /// cyrillic letters, and every letter must land on a latin letter (Б/Ю/Ж/Х/Э
+    /// map to punctuation — then it is not a code). nil when the shape differs.
+    static func latinIDCode(_ core: String) -> String? {
+        let c = Array(core)
+        var i = 0
+        func runLetters(_ max: Int) -> Int {
+            var n = 0
+            while i < c.count, n < max, c[i].isCyrillic, c[i].isUppercase { i += 1; n += 1 }
+            return n
+        }
+        let lead = runLetters(2)
+        var digits = 0
+        while i < c.count, c[i].isASCII, c[i].isNumber { i += 1; digits += 1 }
+        let trail = runLetters(2)
+        guard i == c.count, lead >= 1, (5...9).contains(digits), lead + trail <= 3 else { return nil }
+        let latin = KeyMap.convert(core, to: .en)
+        guard latin.allSatisfy({ ($0.isASCII && $0.isLetter) || $0.isNumber }) else { return nil }
+        return latin
+    }
 
     /// True when a shifted-number symbol sits BETWEEN two letters.
     static func hasInnerSymbol(_ s: String) -> Bool {
@@ -201,6 +231,12 @@ public final class DetectionEngine: @unchecked Sendable {
         if current == .en, whitelistLatin.contains(lc) {
             return .noop(token, layout: current, reason: .typedIsValidWord)
         }
+        // A known English acronym typed in caps on the EN layout is exactly what
+        // the user meant ("HRBP" was turned into "РКИЗ" by the n-gram path and
+        // reverted by hand — the only false positive of the 28.09-08.10 history).
+        if current == .en, Self.isAllCapsWord(core), dicts.acronymsEN.contains(lc) {
+            return .noop(token, layout: current, reason: .typedIsValidWord)
+        }
 
         // --- Length gate --------------------------------------------------------
         if core.letterCount < 1 {
@@ -250,6 +286,19 @@ public final class DetectionEngine: @unchecked Sendable {
                                 confidence: 1.0, reason: .mixedRepaired)
             }
             return .noop(token, layout: current, reason: .mixedScript)
+        }
+
+        // --- Foreign ID codes typed in the RU layout ------------------------------
+        // A caps cyrillic letter glued to 5+ digits has no Russian reading — no
+        // document, plate or abbreviation looks like that — but it is exactly a
+        // Spanish NIE/DNI or a booking code typed with the wrong layout on
+        // ("Я1185954Ч" → "Z1185954X", fixed by hand four times in a week).
+        if current == .ru, let code = Self.latinIDCode(core) {
+            guard let r = token.range(of: core) else { return .noop(token, layout: current, reason: .noLetters) }
+            return Decision(shouldConvert: true, from: .ru, to: .en,
+                            original: token,
+                            converted: String(token[..<r.lowerBound]) + code + String(token[r.upperBound...]),
+                            confidence: 1.0, reason: .idCode)
         }
 
         // --- ALL-CAPS acronym typed in the RU layout -----------------------------
@@ -310,6 +359,13 @@ public final class DetectionEngine: @unchecked Sendable {
         if curIsWord && !altIsWord {
             return .noop(token, layout: current, reason: .typedIsValidWord)
         }
+        // A short ALL-CAPS cyrillic token is a Russian abbreviation far more often
+        // than a mistyped English word ("ФТ" → "AN" was a false positive: the user
+        // was typing "НФТ"). Only the curated acronym and whitelist paths above may
+        // turn such a token into English.
+        if altIsWord && !curIsWord, current == .ru, Self.isAllCapsWord(core), core.letterCount <= 4 {
+            return .noop(token, layout: current, reason: .capsGuard)
+        }
         if altIsWord && !curIsWord {
             return Decision(shouldConvert: true, from: current, to: target,
                             original: token, converted: fullConverted,
@@ -333,6 +389,12 @@ public final class DetectionEngine: @unchecked Sendable {
         // --- Out-of-vocabulary: character n-gram margin -------------------------
         if core.letterCount < config.minWordLength {
             return .noop(token, layout: current, reason: .tooShort)
+        }
+        // Short ALL-CAPS tokens are abbreviations, not words: the n-gram has no say
+        // ("HRBP" scored as Russian "РКИЗ"). Real caps words are long or in the
+        // dictionary, and both of those are decided above.
+        if Self.isAllCapsWord(core), core.letterCount <= 5 {
+            return .noop(token, layout: current, reason: .capsGuard)
         }
         // A real word never carries a shifted-number symbol between two letters
         // ("ye$yj", "так;е"). If that is what converting produces, the token is not a
@@ -382,6 +444,13 @@ public final class DetectionEngine: @unchecked Sendable {
         var lead = "", trail = "", mid = Substring(token)
         while let f = mid.first, softPunct.contains(f) { lead.append(f); mid = mid.dropFirst() }
         while let l = mid.last, softPunct.contains(l) { trail = String(l) + trail; mid = mid.dropLast() }
+        // Converting to Russian, a "[" right after the word is the х key, not a
+        // bracket: plural genitives end in -х all the time ("lt;ehys[" →
+        // "дежурных", not "дежурны["), while a bracket would need an opening one.
+        if target == .ru, !mid.isEmpty, !lead.contains("["), trail.first == "[" {
+            trail.removeFirst()
+            return lead + KeyMap.convert(String(mid) + "[", to: target) + trail
+        }
         return lead + KeyMap.convert(String(mid), to: target) + trail
     }
 }

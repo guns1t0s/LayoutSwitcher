@@ -4,6 +4,7 @@ arqa
 asap
 atm
 aws
+bbva
 cboe
 ceo
 cfo
@@ -19,6 +20,7 @@ csrf
 csv
 cto
 cvss
+dba
 ddos
 dmz
 dns
@@ -29,6 +31,7 @@ fte
 ftp
 fyi
 gpo
+hrbp
 hrd
 https
 iaas

@@ -40,6 +40,9 @@ enum SelfTest {
         check("УК", expectConvert: false)                            // Russian abbreviation kept
         check("ну;но", expectConvert: true, expect: "нужно")         // ⇧4-for-ж slip
         check("цуи", expectConvert: true, expect: "web")             // short EN word
+        check("HRBP", expectConvert: false)                          // EN acronym typed right stays
+        check("ФТ", expectConvert: false)                            // short RU caps abbreviation
+        check("Я1185954Ч", expectConvert: true, expect: "Z1185954X") // NIE code in RU layout
         check("kjubhjdfybt", expectConvert: true, expect: "логирование")  // tech word in dict
         check("rjvgjytyns", expectConvert: true, expect: "компоненты")
         check("gjhzlrt", expectConvert: true, expect: "порядке")     // noun case form (paradigm fill)

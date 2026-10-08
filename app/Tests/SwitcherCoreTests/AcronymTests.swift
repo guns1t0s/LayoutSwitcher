@@ -89,3 +89,50 @@ final class ManualZhRepairTests: XCTestCase {
         XCTAssertEqual(DetectionEngine.repairInnerZh("нужно; да"), "нужно; да")     // real punctuation kept
     }
 }
+
+/// History 28.09-08.10: the two false positives (HRBP → РКИЗ, ФТ → AN), NIE codes,
+/// the trailing-bracket х, and the local personal lexicon.
+final class HistoryRound3Tests: XCTestCase {
+    private let e = DetectionEngine(dictionaries: .loadBundled())
+
+    func testEnglishAcronymTypedInCapsStays() {
+        let d = e.evaluate("HRBP", typedLayout: .en)
+        XCTAssertFalse(d.shouldConvert, "HRBP must stay, got \(d.converted) [\(d.reason)]")
+        XCTAssertEqual(e.evaluate("РКИЗ").converted, "HRBP")       // and the RU-layout typo converts
+    }
+
+    func testShortCapsCyrillicNotTurnedIntoEnglishWord() {
+        let d = e.evaluate("ФТ")
+        XCTAssertFalse(d.shouldConvert, "ФТ must stay, got \(d.converted) [\(d.reason)]")
+        XCTAssertEqual(e.evaluate("GJ").converted, "ПО")           // caps RU word typed on EN still converts
+    }
+
+    func testIDCodesTypedInRussianLayout() {
+        XCTAssertEqual(e.evaluate("Я1185954Ч").converted, "Z1185954X")
+        XCTAssertEqual(e.evaluate("Я2208055Я").converted, "Z2208055Z")
+        XCTAssertEqual(e.evaluate("Я1185954,").converted, "Z1185954,")
+        for keep in ["А123ВС77", "1С", "Т0", "3д", "М2М", "Б1234567"] {      // plates, 1С, T0, Б→","
+            XCTAssertNotEqual(e.evaluate(keep).reason, .idCode, "\(keep) is not an ID code")
+        }
+    }
+
+    func testTrailingBracketIsKhaWhenConvertingToRussian() {
+        XCTAssertEqual(DetectionEngine.convertPreservingOuterPunct("lt;ehys[", to: .ru), "дежурных")
+        XCTAssertEqual(DetectionEngine.convertPreservingOuterPunct("lt;ehys[.", to: .ru), "дежурных.")
+        XCTAssertEqual(DetectionEngine.convertPreservingOuterPunct("[ghbdtn]", to: .ru), "[привет]")
+        let d = e.evaluate("lt;ehys[")
+        if d.shouldConvert { XCTAssertFalse(d.converted.contains("["), d.converted) }
+    }
+
+    func testPersonalLexiconIsLocalOnly() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lswt-lex-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try "квазислово\n".write(to: dir.appendingPathComponent(Dictionaries.userLexiconFile),
+                                 atomically: true, encoding: .utf8)
+        let typo = KeyMap.convert("квазислово", to: .en)
+        let app = DetectionEngine(dictionaries: .loadForApp(directory: dir)).evaluate(typo)
+        XCTAssertEqual(app.converted, "квазислово")
+        XCTAssertEqual(app.reason, .altIsWord)
+        XCTAssertNotEqual(e.evaluate(typo).reason, .altIsWord)     // bundled lists know nothing of it
+    }
+}
