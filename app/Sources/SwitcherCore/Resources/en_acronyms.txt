@@ -5,6 +5,7 @@ asap
 atm
 aws
 bbva
+bmw
 cboe
 ceo
 cfo
@@ -31,6 +32,8 @@ fte
 ftp
 fyi
 gpo
+h1
+h2
 hrbp
 hrd
 https
@@ -46,10 +49,12 @@ ios
 ipo
 iso
 itc
+jfyi
 json
 k8s
 kes
 kit
+kyc
 llm
 lme
 lol
@@ -64,6 +69,7 @@ mvp
 nas
 noc
 npm
+nrd
 nsd
 nyse
 oauth
@@ -83,8 +89,14 @@ poc
 pos
 preprod
 prod
+q1
+q2
+q3
+q4
 qa
 qc
+qo
+qu
 ram
 rdp
 rds
@@ -96,6 +108,7 @@ ro
 roi
 rpo
 rto
+s3
 sa
 saas
 saml

@@ -93,8 +93,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             key: "s", #selector(toggleShadow))
         let comma = NSMenuItem(title: "RU: ⇧6 = запятая", action: #selector(toggleRuShift6Comma), keyEquivalent: "")
         comma.state = s.ruShift6Comma ? .on : .off
+        let early = NSMenuItem(title: "Ранняя конверсия (по первым буквам)", action: #selector(toggleEarlyConvert), keyEquivalent: "")
+        early.state = s.earlyConvert ? .on : .off
+        early.target = self
         comma.target = self
         menu.addItem(comma)
+        menu.addItem(early)
         menu.addItem(.separator())
 
         let recent = NSMenuItem(title: "Недавние конвертации", action: nil, keyEquivalent: "")
@@ -207,6 +211,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(a.informativeText, forType: .string)
         }
+    }
+    @objc private func toggleEarlyConvert() {
+        coordinator.store.updateSettings { $0.earlyConvert.toggle() }
     }
     @objc private func toggleRuShift6Comma() {
         coordinator.store.updateSettings { $0.ruShift6Comma.toggle() }

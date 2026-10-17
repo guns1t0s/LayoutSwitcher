@@ -38,6 +38,12 @@ final class InputCapture {
     var isActive: Bool { tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false }
     private(set) var eventsSeen = 0
     private(set) var tapRearms = 0          // times re-enabled
+    /// Why macOS turned the tap off, and how long our own key handling takes —
+    /// the two things that explain a tap that keeps getting disabled.
+    private(set) var disabledByTimeout = 0
+    private(set) var disabledByUserInput = 0
+    private(set) var slowestKeyMs = 0.0
+    private(set) var slowKeyCallbacks = 0
     private(set) var tapRecreations = 0     // times fully rebuilt (dead port)
 
     // double-shift gesture state
@@ -155,6 +161,7 @@ final class InputCapture {
 
         // macOS disabled the tap (timeout / heavy load) → turn it back on now.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if type == .tapDisabledByTimeout { me.disabledByTimeout += 1 } else { me.disabledByUserInput += 1 }
             if let tap = me.tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return nil
         }
@@ -172,6 +179,12 @@ final class InputCapture {
             event.keyboardGetUnicodeString(maxStringLength: 8, actualStringLength: &length, unicodeString: &buf)
             let chars = String(utf16CodeUnits: buf, count: length)
             me.otherKeySinceShift = true
+            let started = DispatchTime.now().uptimeNanoseconds
+            defer {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+                if ms > me.slowestKeyMs { me.slowestKeyMs = ms }
+                if ms > 50 { me.slowKeyCallbacks += 1 }
+            }
             // The delegate may convert the just-finished word SYNCHRONOUSLY and
             // swallow this boundary keystroke (re-inserting it itself) — that
             // eliminates the async race where a fast next keystroke cancelled a

@@ -22,10 +22,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard ensureSingleInstance() else { NSApp.terminate(nil); return }
         NSApp.setActivationPolicy(.accessory)   // menu-bar only (also LSUIElement in Info.plist)
+        // Global cap on every Accessibility call (set on the system-wide element it
+        // applies to all). The default is 6 s: one busy Electron renderer could
+        // stall our main thread — the same run loop the event tap is serviced on —
+        // long enough for macOS to disable the tap (the "rearms" in diagnostics).
+        // AX readers here all fail open, so a slow app just reads as "unknown".
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.3)
 
         let dicts = Dictionaries.loadForApp()   // bundled + local personal lexicon
+        // System Russian spell checker as the prefix oracle for early conversion:
+        // a dictionary far larger than ours, ~2 ms per lookup, and only asked about
+        // the rare letters that already look like English typed on the RU layout.
+        let speller = NSSpellChecker.shared
+        let ruSpell = speller.availableLanguages.contains("ru")
+        if ruSpell { _ = speller.completions(forPartialWordRange: NSRange(location: 0, length: 3), in: "при", language: "ru", inSpellDocumentWithTag: 0) }   // warm up
         coordinator = ActionCoordinator(store: store, dictionaries: dicts,
                                         layout: layout, context: context, eventLog: eventLog)
+        if ruSpell {
+            coordinator.engine.ruPrefixOracle = { prefix in
+                let n = (prefix as NSString).length
+                let c = speller.completions(forPartialWordRange: NSRange(location: 0, length: n),
+                                            in: prefix, language: "ru", inSpellDocumentWithTag: 0) ?? []
+                return !c.isEmpty
+            }
+        }
         input.delegate = coordinator
 
         // Restarts used to reset word-learning progress (the manual-fix tally is
@@ -127,6 +147,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Accessibility trusted: \(Permissions.isAccessibilityTrusted)
         Input Monitoring granted: \(Permissions.isInputMonitoringGranted)
         Event tap active: \(input.isActive)  (rearms: \(input.tapRearms), recreations: \(input.tapRecreations))
+        Tap disabled by macOS: timeout \(input.disabledByTimeout), user input \(input.disabledByUserInput)
+        Slowest key callback: \(String(format: "%.0f", input.slowestKeyMs)) ms (\(input.slowKeyCallbacks) over 50 ms)
         Key events seen: \(input.eventsSeen)
         Word boundaries seen: \(coordinator.boundariesSeen)
         Conversions applied: \(coordinator.conversionsApplied)
