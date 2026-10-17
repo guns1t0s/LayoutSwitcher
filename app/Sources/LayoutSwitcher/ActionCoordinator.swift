@@ -28,8 +28,14 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// caret — is the user reverting us: the false-positive signal the history
     /// must count (logged as "undo"). The ⇧⇧-on-last-word case alone missed the
     /// "ФТ" → "AN" revert, which was done on a selection.
-    private struct RecentAuto { let converted: String; let original: String; let layoutBefore: Layout; let at: TimeInterval }
+    private struct RecentAuto {
+        let converted: String; let original: String; let layoutBefore: Layout; let at: TimeInterval
+        var prefix = false     // early conversion: the word grew after it, match by prefix
+    }
     private var recentAutos: [RecentAuto] = []
+    /// The latin prefix an early (mid-word) conversion produced for the word in
+    /// progress; nil when the current word was not early-converted.
+    private var earlyWord: String?
     private var lastConversion: LastConversion?
     private var lastContextLayout: Layout?
 
@@ -235,13 +241,61 @@ final class ActionCoordinator: InputCaptureDelegate {
         // Space / punctuation boundaries take the SYNCHRONOUS swallow path: if the
         // finished word converts, we drop this boundary keystroke and re-insert it
         // ourselves, so no async gap exists for the next keystroke to race.
-        for c in aligned(chars) {
+        let typed = aligned(chars)
+        for c in typed {
             let step = buffer.input(c)
             if let word = step.completedWord, onBoundary(word, step.boundary, canSwallow: true) {
                 return true
             }
+            // Mid-word: an English word typed on the RU layout is caught as soon as
+            // its letters cannot start a Russian word (see evaluatePrefix). Single-
+            // character keystrokes only, once per word; the engine check is cheap
+            // and returns nil for ordinary Russian typing, so the guards below — a
+            // few of which touch AX — run only on the rare candidate.
+            if step.completedWord == nil, step.boundary == nil, typed.count == 1, earlyWord == nil,
+               let d = engine.evaluatePrefix(buffer.word), earlyAllowed() {
+                applyEarly(d)
+                return true
+            }
         }
         return false
+    }
+
+    /// Guards for a mid-word conversion: the same stand-downs as the boundary
+    /// path (off / shadow / Fn / fullscreen / IME / secure / domain / per-app),
+    /// plus the earlyConvert setting and the RU layout actually being active.
+    private func earlyAllowed() -> Bool {
+        let s = store.settings
+        guard s.autoConvertEnabled, s.earlyConvert, !s.shadowMode,
+              !suppressActive, !fullscreenActive else { return false }
+        guard layout.currentLayout() == .ru, !layout.isInputMethodActive() else { return false }
+        guard !context.isSecureInput, !domainBlocked() else { return false }
+        return effectiveRule(for: context.frontmostBundleID).mode == .auto
+    }
+
+    /// Replace the word in progress with its latin form and switch to EN. Runs in
+    /// the tap callback for the keystroke that completed the prefix: that letter
+    /// is not on screen yet (we swallow it), so the screen holds one fewer.
+    private func applyEarly(_ d: Decision) {
+        let onScreen = max(0, buffer.word.count - 1)
+        switchLayout(.en)
+        layout.replace(deleteCount: onScreen, with: d.converted)
+        buffer.replaceWord(d.converted)
+        earlyWord = d.converted
+        lastContextLayout = .en
+        conversionsApplied += 1
+        note(d.original, d.reason.rawValue, converted: d.converted)
+        log("auto", original: d.original, converted: d.converted, from: .ru, to: .en,
+            reason: d.reason.rawValue, confidence: d.confidence)
+        recentAutos.append(RecentAuto(converted: d.converted, original: d.original, layoutBefore: .ru,
+                                      at: ProcessInfo.processInfo.systemUptime, prefix: true))
+        if recentAutos.count > 5 { recentAutos.removeFirst() }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.feedback()
+            self.onConversionApplied?(.en, d.converted)
+            self.record(d, applied: true)
+        }
     }
 
     func inputDidChangeFlags(_ flags: CGEventFlags) {
@@ -272,6 +326,8 @@ final class ActionCoordinator: InputCaptureDelegate {
     private func onBoundary(_ word: String, _ boundary: Character?, canSwallow: Bool) -> Bool {
         boundariesSeen += 1
         lastCompleted = LastWord(text: word, boundary: boundary)
+        let early = earlyWord
+        earlyWord = nil
 
         // FR-26: snippet/autoreplace expansion takes priority over conversion.
         if store.settings.expandSnippets,
@@ -336,6 +392,14 @@ final class ActionCoordinator: InputCaptureDelegate {
             return false
         }
 
+        if let early, word.hasPrefix(early), decision.to == .ru {
+            // The word we converted mid-word turned out Russian once complete, and
+            // the ordinary rules are converting it back: an early false positive
+            // that healed itself. Count it, so the early rule can be judged on data.
+            log("early-healed", original: word, converted: decision.converted, from: .en, to: .ru,
+                reason: decision.reason.rawValue)
+            recentAutos.removeAll { $0.prefix && word.hasPrefix($0.converted) }
+        }
         conversionsApplied += 1
         note(word, decision.reason.rawValue, converted: decision.converted)
         log("auto", original: word, converted: decision.converted,
@@ -505,10 +569,21 @@ final class ActionCoordinator: InputCaptureDelegate {
         // gesture did it. Log it like undo() so the history stays honest.
         let now = ProcessInfo.processInfo.systemUptime
         let shown = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let i = recentAutos.lastIndex(where: { $0.converted == shown && now - $0.at < 120 }) {
+        if let i = recentAutos.lastIndex(where: { a in
+            now - a.at < 120 && (a.converted == shown || (a.prefix && shown.hasPrefix(a.converted)))
+        }) {
             let a = recentAutos.remove(at: i)
-            log("undo", original: a.converted, converted: a.original,
+            // For an early conversion the word grew after it: the original is the
+            // whole word as the RU layout would have typed it.
+            let original = a.prefix ? KeyMap.convert(shown, to: a.layoutBefore) : a.original
+            log("undo", original: shown, converted: original,
                 from: a.layoutBefore.other, to: a.layoutBefore, reason: "manual-revert/\(branch)")
+            // Learn it, like the undo hotkey does (FR-18): a word the user reverted
+            // by hand is never auto-converted again — whole word or, for early
+            // conversion, any prefix of it. Before, a reverted word ("сфтп" →
+            // "cang") would have been converted again the next time.
+            store.recordRevert(original)
+            engine.learnedReverts = store.revertedWords()
         }
         let from = text.dominantLayout ?? layout.currentLayout() ?? .en
         let converted = KeyMap.convert(text, to: from.other)
@@ -756,6 +831,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         buffer.reset()
         lastCompleted = nil
         lastConversion = nil
+        earlyWord = nil
         lastContextLayout = nil   // drop stale surrounding-language context (cut random n-gram bias)
     }
 

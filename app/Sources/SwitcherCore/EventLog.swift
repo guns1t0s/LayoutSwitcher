@@ -125,6 +125,7 @@ public final class EventLog: @unchecked Sendable {
         let body: String
         switch e.kind {
         case "phantom":  body = "⇧⇧ впустую (нечего конвертировать)"
+        case "early-healed": body = "ранняя конверсия откачена на границе \"\(e.original)\" → \"\(e.converted)\""
         case "ambiguous": body = "неоднозначно \"\(e.original)\" (вариант \"\(e.converted)\") - не тронуто"
         case "skip":     body = "пропуск \"\(e.original)\" (вариант \"\(e.converted)\") [\(e.reason) \(String(format: "%.2f", e.confidence))]"
         case "blocked" where !e.original.isEmpty:

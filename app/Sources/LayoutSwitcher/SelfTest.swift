@@ -43,6 +43,9 @@ enum SelfTest {
         check("HRBP", expectConvert: false)                          // EN acronym typed right stays
         check("ФТ", expectConvert: false)                            // short RU caps abbreviation
         check("Я1185954Ч", expectConvert: true, expect: "Z1185954X") // NIE code in RU layout
+        check("Й4", expectConvert: true, expect: "Q4")               // code with a digit
+        eq("early срф", e.evaluatePrefix("срф")?.converted ?? "nil", "cha")   // mid-word EN on RU layout
+        eq("early привет", e.evaluatePrefix("при")?.converted ?? "nil", "nil")
         check("kjubhjdfybt", expectConvert: true, expect: "логирование")  // tech word in dict
         check("rjvgjytyns", expectConvert: true, expect: "компоненты")
         check("gjhzlrt", expectConvert: true, expect: "порядке")     // noun case form (paradigm fill)

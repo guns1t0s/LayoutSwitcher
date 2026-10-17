@@ -18,6 +18,7 @@ public enum DetectionReason: String, Sendable {
     case slipRepaired            // ⇧4 typed where ж was meant ("$"/";" between letters)
     case capsGuard               // short ALL-CAPS token: abbreviation-shaped, generic paths stand down
     case idCode                  // caps letter(s) glued to 5+ digits, typed in RU layout (NIE "Я1185954Ч")
+    case early                   // converted mid-word: the letters so far cannot start a Russian word
     case ambiguousResolved       // valid both ways, resolved by frequency + context
     case morphology              // OOV, but a plausible inflection of a known stem
 }
@@ -91,7 +92,7 @@ public final class DetectionEngine: @unchecked Sendable {
         if d.shouldConvert { return false }              // wrong-layout image
         switch d.reason {
         case .typedIsValidWord, .ambiguousBothValid, .excepted, .whitelistedLatin, .acronym, .slipRepaired,
-             .capsGuard, .idCode:
+             .capsGuard, .idCode, .early:
             return false                                  // already known / conflicted
         default:
             return true                                   // genuinely new vocabulary
@@ -172,6 +173,77 @@ public final class DetectionEngine: @unchecked Sendable {
         guard let r = token.range(of: core) else { return nil }
         let out = String(token[..<r.lowerBound]) + ruCore + String(token[r.upperBound...])
         return (out, ruCore)
+    }
+
+    // MARK: - Early (mid-word) conversion
+
+    /// Shortest prefix early conversion may act on, and the n-gram gap it needs.
+    public var earlyMinLength = 3
+    public var earlyMinMargin = 1.0
+    /// "Can these letters still start a Russian word?" from a source far larger
+    /// than the bundled lists (the app wires the system Russian spell checker).
+    /// Consulted last, only for a candidate that passed every other check. The
+    /// bundled dictionary alone let "пше" through to "git" — "пшеница" is not in
+    /// it; neither were "рун…" (Рунет) or "суте…" (сутенер).
+    public var ruPrefixOracle: ((String) -> Bool)?
+
+    private lazy var ruPrefixes: Set<String> = dicts.model(for: .ru).prefixSet(minLength: earlyMinLength)
+    private lazy var enPrefixes: Set<String> = dicts.model(for: .en).prefixSet(minLength: earlyMinLength)
+
+    /// Decide whether a word STILL BEING TYPED in the Russian layout is really an
+    /// English word typed on the wrong layout — before its boundary arrives.
+    ///
+    /// The history showed the user fixing such words by hand after 3-4 letters
+    /// ("срф" → "cha", "швь" → "idm", "пкф" → "gra": 95 mid-word ⇧⇧ in nine days),
+    /// because the boundary rule only ever sees whole words. Conditions, all
+    /// required (when in doubt, do nothing):
+    ///  - at least `earlyMinLength` letters, all cyrillic, typed in the RU layout;
+    ///  - NO Russian word the app knows (bundled, the user's lexicon, learned)
+    ///    starts with them, and they are not the start of a protected Russian
+    ///    abbreviation, an exception or a word the user reverted;
+    ///  - the latin twin is all letters and starts an English word or a curated
+    ///    term (whitelist / acronym / learned); for a caps token only the curated
+    ///    terms count, since caps tokens are abbreviations;
+    ///  - unless it matched a curated term, the twin must look clearly more
+    ///    English than the original looks Russian (n-gram gap >= earlyMinMargin).
+    /// A wrong call is self-healing for longer words: the user keeps typing in
+    /// the new layout, and at the boundary the ordinary rules convert a Russian
+    /// word back.
+    public func evaluatePrefix(_ token: String) -> Decision? {
+        var letters = Substring(token)
+        if letters.first == "\"" { letters = letters.dropFirst() }   // mention: "тшл → @nik
+        let core = String(letters)
+        guard core.count >= earlyMinLength,
+              core.allSatisfy({ $0.isCyrillic && $0.isLetter }) else { return nil }
+        let lc = core.lowercased()
+        if ruPrefixes.contains(lc) { return nil }
+        func starts(_ set: Set<String>) -> Bool { set.contains { $0.hasPrefix(lc) } }
+        if starts(learnedWords) || starts(exceptions) || starts(learnedReverts)
+            || starts(dicts.acronymsRU) { return nil }
+        let twin = KeyMap.convert(core, to: .en)
+        guard twin.allSatisfy({ $0.isASCII && $0.isLetter }) else { return nil }
+        let tl = twin.lowercased()
+        let curated = whitelistLatin.contains { $0.hasPrefix(tl) }
+            || dicts.acronymsEN.contains { $0.hasPrefix(tl) }
+            || learnedWords.contains { $0.hasPrefix(tl) }
+        if Self.isAllCapsWord(core) {
+            guard curated else { return nil }
+        } else if !curated {
+            guard enPrefixes.contains(tl) else { return nil }
+            let margin = dicts.model(for: .en).scorePrefix(tl) - dicts.model(for: .ru).scorePrefix(lc)
+            guard margin >= earlyMinMargin else { return nil }
+        }
+        if let oracle = ruPrefixOracle, oracle(lc) { return nil }
+        return Decision(shouldConvert: true, from: .ru, to: .en, original: token,
+                        converted: KeyMap.convert(token, to: .en),
+                        confidence: 0.9, reason: .early)
+    }
+
+    /// n-gram gap for a prefix (diagnostics / tuning).
+    public func earlyMargin(_ prefix: String) -> Double {
+        let lc = prefix.lowercased()
+        return dicts.model(for: .en).scorePrefix(KeyMap.convert(lc, to: .en))
+            - dicts.model(for: .ru).scorePrefix(lc)
     }
 
     public func evaluate(_ token: String,
@@ -307,9 +379,13 @@ public final class DetectionEngine: @unchecked Sendable {
         // purpose: lowercase twins sit next to real Russian typos ("ешу"~"еду"),
         // while nobody types a Russian word in all caps mid-sentence except an
         // abbreviation — and those are protected (acronymsRU) and pre-gated.
-        if current == .ru, core.count >= 2, core.count <= 8,
-           core.allSatisfy({ ($0.isLetter && $0.isUppercase) || $0.isNumber }),
-           core.filter({ $0.isLetter }).count >= 2,
+        let capsShape = core.allSatisfy({ ($0.isLetter && $0.isUppercase) || $0.isNumber })
+            && core.filter({ $0.isLetter }).count >= 2
+        // A digit makes it a code, never a Russian word ("Й4" → Q4, "ы3" → S3), so
+        // there the case does not matter — the curated list still has to match.
+        let codeShape = core.contains(where: { $0.isNumber })
+            && core.allSatisfy({ $0.isLetter || $0.isNumber })
+        if current == .ru, core.count >= 2, core.count <= 8, capsShape || codeShape,
            dicts.acronymsEN.contains(altLC), !dicts.acronymsRU.contains(lc) {
             return Decision(shouldConvert: true, from: .ru, to: .en,
                             original: token, converted: fullConverted,

@@ -74,6 +74,11 @@ public struct Settings: Codable, Sendable, Equatable {
     /// own glyph (user preference — their muscle memory puts the comma there).
     public var ruShift6Comma: Bool = true
 
+    /// Convert an English word typed on the RU layout as soon as its first letters
+    /// cannot start a Russian word ("срф" → "cha"), instead of waiting for the
+    /// space. The history showed most manual ⇧⇧ fixes landing mid-word.
+    public var earlyConvert: Bool = true
+
     public init() {}
 
     /// Tolerant decoding: a settings.json written by an older build is MISSING any
@@ -110,6 +115,7 @@ public struct Settings: Codable, Sendable, Equatable {
         appBlacklist          = v(.appBlacklist, d.appBlacklist)
         logHistory            = v(.logHistory, d.logHistory)
         ruShift6Comma         = v(.ruShift6Comma, d.ruShift6Comma)
+        earlyConvert          = v(.earlyConvert, d.earlyConvert)
     }
 }
 

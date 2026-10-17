@@ -87,6 +87,40 @@ public final class LanguageModel: @unchecked Sendable {
         words.contains(word.lowercased())
     }
 
+    /// Every prefix (length >= `minLength`) of every word the model knows. Used
+    /// to tell whether letters typed so far can still become a word of this
+    /// language — the basis of mid-word ("early") conversion.
+    public func prefixSet(minLength: Int) -> Set<String> {
+        var s = Set<String>()
+        for w in words where w.count >= minLength {
+            var p = ""
+            for (i, c) in w.enumerated() {
+                p.append(c)
+                if i + 1 >= minLength { s.insert(p) }
+            }
+        }
+        return s
+    }
+
+    /// Like `score`, but for the START of a word: no end-of-word transition, so
+    /// a word in progress is not penalised for "ending" where it does not end.
+    public func scorePrefix(_ prefix: String) -> Double {
+        let chars = Array("^^" + prefix.lowercased())
+        guard chars.count >= 3, uniTotal > 0 else { return unkLogProb }
+        let l3 = 0.6, l2 = 0.3, l1 = 0.1
+        var sum = 0.0, n = 0
+        for i in 0...(chars.count - 3) {
+            let c1 = chars[i], c2 = chars[i + 1], c3 = chars[i + 2]
+            let ctx2 = String([c1, c2])
+            let p3 = (bi[ctx2] ?? 0) > 0 ? (tri[String([c1, c2, c3])] ?? 0) / bi[ctx2]! : 0
+            let p2 = (uni[c2] ?? 0) > 0 ? (bi[String([c2, c3])] ?? 0) / uni[c2]! : 0
+            let p1 = (uni[c3] ?? 0) / uniTotal
+            sum += log(max(l3 * p3 + l2 * p2 + l1 * p1, 1e-7))
+            n += 1
+        }
+        return n > 0 ? sum / Double(n) : unkLogProb
+    }
+
     /// Mean log-probability of `word` under a linearly-interpolated
     /// unigram+bigram+trigram character model. Higher = more native-looking. The
     /// interpolation avoids the old add-1 floor that collapsed seen/unseen
