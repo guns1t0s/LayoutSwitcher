@@ -19,6 +19,8 @@ public enum DetectionReason: String, Sendable {
     case capsGuard               // short ALL-CAPS token: abbreviation-shaped, generic paths stand down
     case idCode                  // caps letter(s) glued to 5+ digits, typed in RU layout (NIE "Я1185954Ч")
     case early                   // converted mid-word: the letters so far cannot start a Russian word
+    case mention                 // "<letters> typed on the RU layout where @<login> was meant
+    case brackets                // "хъ" typed on the RU layout where "[]" was meant
     case ambiguousResolved       // valid both ways, resolved by frequency + context
     case morphology              // OOV, but a plausible inflection of a known stem
 }
@@ -92,7 +94,7 @@ public final class DetectionEngine: @unchecked Sendable {
         if d.shouldConvert { return false }              // wrong-layout image
         switch d.reason {
         case .typedIsValidWord, .ambiguousBothValid, .excepted, .whitelistedLatin, .acronym, .slipRepaired,
-             .capsGuard, .idCode, .early:
+             .capsGuard, .idCode, .early, .mention, .brackets:
             return false                                  // already known / conflicted
         default:
             return true                                   // genuinely new vocabulary
@@ -189,6 +191,52 @@ public final class DetectionEngine: @unchecked Sendable {
 
     private lazy var ruPrefixes: Set<String> = dicts.model(for: .ru).prefixSet(minLength: earlyMinLength)
     private lazy var enPrefixes: Set<String> = dicts.model(for: .en).prefixSet(minLength: earlyMinLength)
+    /// First one and two letters of every Russian word the app knows.
+    private lazy var ruHeads: Set<String> = dicts.model(for: .ru).prefixSet(minLength: 1, maxLength: 2)
+
+    /// Build the lazy prefix sets now. The first mid-word check otherwise builds
+    /// them inside the event-tap callback (~80 ms, the "slowest key callback" in
+    /// the 24.10 diagnostics) — the app calls this at launch, off the tap path.
+    public func warmUp() {
+        _ = ruPrefixes.count; _ = enPrefixes.count; _ = ruHeads.count
+    }
+
+    /// Letters after the quote that NO Russian word can start with: the quote is
+    /// not a quotation mark but Shift+2 typed on the RU layout where "@" was meant.
+    ///
+    /// History 15-24.10: 46 manual "\"" → "@" fixes, 43 of them in Mattermost,
+    /// plus "\"ыв" → "@sd", "\"лф" → "@ka"... A quote cannot be swapped for
+    /// "@" on sight — the user does quote Russian words there ("\"гасятся\"") —
+    /// but a quotation starts a Russian word, and "ы", "ь", "тш", "дф", "лф", "зщ"
+    /// start none. So: one letter only for ы/ь (no Russian word starts with
+    /// them); two or more when neither the dictionaries nor the system spell
+    /// checker know a Russian word starting with them. The twin must be a login
+    /// (latin letters / digits). A reverted or excepted prefix blocks it.
+    public func evaluateMention(_ token: String) -> Decision? {
+        guard token.first == "\"" else { return nil }
+        let core = String(token.dropFirst())
+        // Logins are lowercase and give themselves away in the first letters (the
+        // history: 23 of 24 caught by the 2nd letter). Capitalised tokens and later
+        // letters are where quoted Russian lives — names ("Акимов"), abbreviations
+        // ("НРД", "РФ"), typos ("Прс") — so the window is 1-3 lowercase letters.
+        guard (1...3).contains(core.count),
+              core.allSatisfy({ $0.isCyrillic && $0.isLetter && $0.isLowercase }) else { return nil }
+        let lc = core.lowercased()
+        let twin = KeyMap.convert(core, to: .en)
+        guard twin.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else { return nil }
+        func starts(_ set: Set<String>) -> Bool { set.contains { $0.hasPrefix(lc) } }
+        if starts(learnedReverts) || starts(exceptions) { return nil }
+        if lc.count == 1 {
+            guard lc == "ы" || lc == "ь" else { return nil }
+        } else {
+            if lc.count == 2 ? ruHeads.contains(lc) : ruPrefixes.contains(lc) { return nil }
+            if starts(learnedWords) { return nil }
+            if let oracle = ruPrefixOracle, oracle(lc) { return nil }
+        }
+        return Decision(shouldConvert: true, from: .ru, to: .en, original: token,
+                        converted: KeyMap.convert(token, to: .en),
+                        confidence: 0.9, reason: .mention)
+    }
 
     /// Decide whether a word STILL BEING TYPED in the Russian layout is really an
     /// English word typed on the wrong layout — before its boundary arrives.
@@ -210,6 +258,28 @@ public final class DetectionEngine: @unchecked Sendable {
     /// the new layout, and at the boundary the ordinary rules convert a Russian
     /// word back.
     public func evaluatePrefix(_ token: String) -> Decision? {
+        // "хъ" starts no Russian word: it is "[]" typed on the RU layout (six
+        // manual fixes, all followed by Russian text — so no layout switch).
+        if token == "хъ" || token == "ХЪ" {
+            return Decision(shouldConvert: true, from: .ru, to: .en, original: token,
+                            converted: token == "хъ" ? "[]" : "{}", confidence: 1.0, reason: .brackets)
+        }
+        // A code with a digit that EXACTLY spells a curated term ("Й4" → Q4,
+        // "ы3" → s3): no Russian reading, and the list decides — fixed by hand
+        // mid-word three times because the boundary rule only fires on the space.
+        if token.contains(where: { $0.isNumber }) {
+            guard token.count >= 2, token.count <= 8,
+                  token.allSatisfy({ ($0.isCyrillic && $0.isLetter) || ($0.isASCII && $0.isNumber) }),
+                  token.contains(where: { $0.isLetter }) else { return nil }
+            let lc = token.lowercased()
+            let tl = KeyMap.convert(lc, to: .en)
+            guard tl.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }),
+                  dicts.acronymsEN.contains(tl) || whitelistLatin.contains(tl) || learnedWords.contains(tl),
+                  !dicts.acronymsRU.contains(lc), !learnedReverts.contains(lc), !exceptions.contains(lc)
+            else { return nil }
+            return Decision(shouldConvert: true, from: .ru, to: .en, original: token,
+                            converted: KeyMap.convert(token, to: .en), confidence: 1.0, reason: .early)
+        }
         var letters = Substring(token)
         if letters.first == "\"" { letters = letters.dropFirst() }   // mention: "тшл → @nik
         let core = String(letters)
@@ -308,6 +378,17 @@ public final class DetectionEngine: @unchecked Sendable {
         // reverted by hand — the only false positive of the 28.09-08.10 history).
         if current == .en, Self.isAllCapsWord(core), dicts.acronymsEN.contains(lc) {
             return .noop(token, layout: current, reason: .typedIsValidWord)
+        }
+        // The mirror case: a RUSSIAN abbreviation typed in caps on the EN layout
+        // inside Russian text ("ER" → "УК", "LRG" → "ДКП", "YAN" → "НФТ", all fixed
+        // by hand). Only protected abbreviations, only with Russian context, and
+        // never when the latin form is itself a known term.
+        if current == .en, context == .ru, Self.isAllCapsWord(core), core.count <= 6,
+           !whitelistLatin.contains(lc), !learnedWords.contains(lc),
+           !dicts.model(for: .en).contains(lc),            // "HR" stays HR, not "РК"
+           dicts.acronymsRU.contains(KeyMap.convert(lc, to: .ru)) {
+            return Decision(shouldConvert: true, from: .en, to: .ru, original: token,
+                            converted: fullConverted, confidence: 1.0, reason: .acronym)
         }
 
         // --- Length gate --------------------------------------------------------

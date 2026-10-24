@@ -68,12 +68,15 @@ final class EarlyConversionTests: XCTestCase {
         XCTAssertNil(e.evaluatePrefix("срф"), "a reverted word blocks its prefixes")
     }
 
-    // Not for letters that land on punctuation, digits or mixed script.
+    // Not for letters that land on punctuation, digits or mixed script — except
+    // the two deliberate cases: the bracket pair "хъ" and a code that EXACTLY
+    // spells a curated term (both tested in CodesAndBracketsTests).
     func testOnlyPureCyrillicLetters() {
         let e = engine()
-        XCTAssertNil(e.evaluatePrefix("хъ"))       // too short and [ ] twins
+        XCTAssertNil(e.evaluatePrefix("хх"))       // [[ twin, not the bracket pair
         XCTAssertNil(e.evaluatePrefix("бюж"))      // , . ; twins
-        XCTAssertNil(e.evaluatePrefix("ы3"))
+        XCTAssertNil(e.evaluatePrefix("ы9"))       // digit code, not curated
+        XCTAssertNil(e.evaluatePrefix("ыsх"))      // mixed script
     }
 }
 

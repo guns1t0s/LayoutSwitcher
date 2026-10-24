@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ruSpell { _ = speller.completions(forPartialWordRange: NSRange(location: 0, length: 3), in: "при", language: "ru", inSpellDocumentWithTag: 0) }   // warm up
         coordinator = ActionCoordinator(store: store, dictionaries: dicts,
                                         layout: layout, context: context, eventLog: eventLog)
+        coordinator.engine.warmUp()   // prefix sets now, not inside the first key callback
         if ruSpell {
             coordinator.engine.ruPrefixOracle = { prefix in
                 let n = (prefix as NSString).length

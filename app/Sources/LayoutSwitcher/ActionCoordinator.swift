@@ -36,6 +36,16 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// The latin prefix an early (mid-word) conversion produced for the word in
     /// progress; nil when the current word was not early-converted.
     private var earlyWord: String?
+    /// Set when a mention ("@login") was produced from a quote typed on the RU
+    /// layout: once the login is finished, go back to that layout. In the history
+    /// the text after a mention was Russian every time it was visible, and each
+    /// time it cost an extra conversion of the first Russian word typed on EN.
+    private var mentionReturn: Layout?
+    /// The text of the last RU→EN conversion until the next word is decided —
+    /// logged as "after-en" with that word's decision. The log skips correct
+    /// words, so whether the user goes back to Russian after an English insert
+    /// (and the layout should follow) was invisible in 63 of 92 cases.
+    private var afterForeign: String?
     private var lastConversion: LastConversion?
     private var lastContextLayout: Layout?
 
@@ -64,6 +74,10 @@ final class ActionCoordinator: InputCaptureDelegate {
 
     /// Record one boundary outcome: tally the reason and append to the ring.
     private func note(_ word: String, _ reason: String, converted: String? = nil) {
+        if let pending = afterForeign, !word.lowercased().hasPrefix(pending.lowercased()) {
+            afterForeign = nil
+            log("after-en", original: word, reason: "\(reason)/tis:\(layout.currentLayout()?.short ?? "?")")
+        }
         reasonCounts[reason, default: 0] += 1
         let entry = converted.map { "\(word) → \($0) [\(reason)]" } ?? "\(word) [\(reason)]"
         recentDecisions.insert(entry, at: 0)
@@ -252,10 +266,14 @@ final class ActionCoordinator: InputCaptureDelegate {
             // character keystrokes only, once per word; the engine check is cheap
             // and returns nil for ordinary Russian typing, so the guards below — a
             // few of which touch AX — run only on the rare candidate.
-            if step.completedWord == nil, step.boundary == nil, typed.count == 1, earlyWord == nil,
-               let d = engine.evaluatePrefix(buffer.word), earlyAllowed() {
-                applyEarly(d)
-                return true
+            if step.completedWord == nil, step.boundary == nil, typed.count == 1, earlyWord == nil {
+                let w = buffer.word
+                let d = w.first == "\"" ? (engine.evaluateMention(w) ?? engine.evaluatePrefix(w))
+                                       : engine.evaluatePrefix(w)
+                if let d, earlyAllowed() {
+                    applyEarly(d)
+                    return true
+                }
             }
         }
         return false
@@ -278,13 +296,17 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// is not on screen yet (we swallow it), so the screen holds one fewer.
     private func applyEarly(_ d: Decision) {
         let onScreen = max(0, buffer.word.count - 1)
-        switchLayout(.en)
+        // Brackets are layout-neutral and Russian text follows them: keep RU.
+        let keepLayout = d.reason == .brackets
+        if !keepLayout { switchLayout(.en) }
         layout.replace(deleteCount: onScreen, with: d.converted)
         buffer.replaceWord(d.converted)
         earlyWord = d.converted
-        lastContextLayout = .en
+        if !keepLayout { lastContextLayout = .en }
+        if d.reason == .mention { mentionReturn = .ru }
         conversionsApplied += 1
         note(d.original, d.reason.rawValue, converted: d.converted)
+        if !keepLayout { afterForeign = d.converted }
         log("auto", original: d.original, converted: d.converted, from: .ru, to: .en,
             reason: d.reason.rawValue, confidence: d.confidence)
         recentAutos.append(RecentAuto(converted: d.converted, original: d.original, layoutBefore: .ru,
@@ -328,6 +350,14 @@ final class ActionCoordinator: InputCaptureDelegate {
         lastCompleted = LastWord(text: word, boundary: boundary)
         let early = earlyWord
         earlyWord = nil
+        if let back = mentionReturn {
+            mentionReturn = nil
+            if word.hasPrefix("@") && layout.currentLayout() != back {
+                switchLayout(back)
+                lastContextLayout = back
+                log("mention-return", original: word, to: back, reason: "login finished")
+            }
+        }
 
         // FR-26: snippet/autoreplace expansion takes priority over conversion.
         if store.settings.expandSnippets,
@@ -424,6 +454,8 @@ final class ActionCoordinator: InputCaptureDelegate {
             self.lastConversion = LastConversion(original: word, converted: decision.converted,
                                                  boundary: boundary, layoutBefore: decision.from)
         }
+
+        if decision.to == .en { afterForeign = decision.converted }
 
         if canSwallow {
             // SYNCHRONOUS path: the boundary keystroke is about to be swallowed,
@@ -582,7 +614,9 @@ final class ActionCoordinator: InputCaptureDelegate {
             // by hand is never auto-converted again — whole word or, for early
             // conversion, any prefix of it. Before, a reverted word ("сфтп" →
             // "cang") would have been converted again the next time.
-            store.recordRevert(original)
+            // Stored without a leading quote: the rules compare letters only, so a
+            // reverted mention ("тшл" from "\"тшл") must block by its letters.
+            store.recordRevert(original.trimmingCharacters(in: CharacterSet(charactersIn: "\"")))
             engine.learnedReverts = store.revertedWords()
         }
         let from = text.dominantLayout ?? layout.currentLayout() ?? .en
@@ -636,6 +670,8 @@ final class ActionCoordinator: InputCaptureDelegate {
             self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             self.switchLayout(to)
             self.lastContextLayout = to   // keep engine context aligned with the new layout
+            if inProgress, text.hasPrefix("\""), to == .en { self.mentionReturn = from }   // "\"" + ⇧⇧ = "@"
+            if to == .en { self.afterForeign = converted }
             self.feedback()
             self.onConversionApplied?(to, converted)
             if inProgress {
@@ -832,6 +868,8 @@ final class ActionCoordinator: InputCaptureDelegate {
         lastCompleted = nil
         lastConversion = nil
         earlyWord = nil
+        mentionReturn = nil
+        afterForeign = nil
         lastContextLayout = nil   // drop stale surrounding-language context (cut random n-gram bias)
     }
 

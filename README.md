@@ -11,8 +11,11 @@ sets the right layout before you type, and never touches the network.
 ## Features
 
 - **Auto‑convert** a word typed in the wrong layout (`ghbdtn ` → `привет `) using
-  frequency dictionaries + a character‑trigram model. Converts only at a word
-  boundary and only at high confidence — never mid‑word, never on doubt.
+  frequency dictionaries + a character‑trigram model, only at high confidence —
+  never on doubt. English typed on the RU layout is caught mid‑word as soon as its
+  first letters cannot start a Russian word (`срф` → `cha…`), mentions as soon as
+  the letters after `"` cannot (`"тш` → `@ni…`); caps acronyms and codes convert
+  from a curated list (`СУЩ` → `CEO`, `Й4` → `Q4`).
 - **Proactive layout** before you type: per‑app / per‑field memory, latin for
   url / search / password fields.
 - **One‑key correction loop**: fix the last word (`⌃⌥Z`), repeat to cycle back;
@@ -79,11 +82,20 @@ other layout:
 
 Exceptions / whitelist / learned reverts short‑circuit everything above.
 
+Mid‑word, a word still being typed on the RU layout converts to English only when
+no Russian word the app knows starts with its letters (bundled lists, your local
+lexicon, and the system Russian spell checker) and the latin form starts an
+English word or a curated term. A manual revert of any conversion is learned, so
+the same word is never converted again.
+
 ## Privacy
 
 No network code anywhere (no telemetry, no update checks). The current‑word buffer
 is ephemeral and wiped at every boundary; only your settings and lexicons are stored
-locally under `~/Library/Application Support/LayoutSwitcher/`.
+locally under `~/Library/Application Support/LayoutSwitcher/`. The switching
+history (`events.json`, off by default, menu → История) and the personal lexicon
+mined from it (`user_ru_words.txt`) contain words you typed, so they stay there and
+never go into the repository.
 
 ## Project layout
 

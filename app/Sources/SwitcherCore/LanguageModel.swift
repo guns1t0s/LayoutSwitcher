@@ -90,11 +90,12 @@ public final class LanguageModel: @unchecked Sendable {
     /// Every prefix (length >= `minLength`) of every word the model knows. Used
     /// to tell whether letters typed so far can still become a word of this
     /// language — the basis of mid-word ("early") conversion.
-    public func prefixSet(minLength: Int) -> Set<String> {
+    public func prefixSet(minLength: Int, maxLength: Int = .max) -> Set<String> {
         var s = Set<String>()
         for w in words where w.count >= minLength {
             var p = ""
             for (i, c) in w.enumerated() {
+                if i >= maxLength { break }
                 p.append(c)
                 if i + 1 >= minLength { s.insert(p) }
             }
