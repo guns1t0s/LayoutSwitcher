@@ -125,6 +125,8 @@ public final class EventLog: @unchecked Sendable {
         let body: String
         switch e.kind {
         case "phantom":  body = "⇧⇧ впустую (нечего конвертировать)"
+        case "mention-return": body = "логин \"\(e.original)\" дописан, раскладка возвращена в \(e.to.uppercased())"
+        case "after-en": body = "после английской вставки: \"\(e.original)\" [\(e.reason)]"
         case "early-healed": body = "ранняя конверсия откачена на границе \"\(e.original)\" → \"\(e.converted)\""
         case "ambiguous": body = "неоднозначно \"\(e.original)\" (вариант \"\(e.converted)\") - не тронуто"
         case "skip":     body = "пропуск \"\(e.original)\" (вариант \"\(e.converted)\") [\(e.reason) \(String(format: "%.2f", e.confidence))]"

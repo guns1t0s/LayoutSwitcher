@@ -46,6 +46,11 @@ enum SelfTest {
         check("Й4", expectConvert: true, expect: "Q4")               // code with a digit
         eq("early срф", e.evaluatePrefix("срф")?.converted ?? "nil", "cha")   // mid-word EN on RU layout
         eq("early привет", e.evaluatePrefix("при")?.converted ?? "nil", "nil")
+        eq("mention \"тш", e.evaluateMention("\"тш")?.converted ?? "nil", "@ni")
+        eq("quote \"при", e.evaluateMention("\"при")?.converted ?? "nil", "nil")
+        eq("brackets хъ", e.evaluatePrefix("хъ")?.converted ?? "nil", "[]")
+        eq("code Й4", e.evaluatePrefix("Й4")?.converted ?? "nil", "Q4")
+        eq("ER in RU text", e.evaluate("ER", typedLayout: .en, context: .ru).converted, "УК")
         check("kjubhjdfybt", expectConvert: true, expect: "логирование")  // tech word in dict
         check("rjvgjytyns", expectConvert: true, expect: "компоненты")
         check("gjhzlrt", expectConvert: true, expect: "порядке")     // noun case form (paradigm fill)
