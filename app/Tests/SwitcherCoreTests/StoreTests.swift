@@ -28,6 +28,84 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(s2.data.snippets["брб"], "буду рядом быстро")
     }
 
+    func testUserDataFromAnOlderBuildKeepsEverything() throws {
+        let dir = tempDir()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let old = #"{"exceptions":["fetch"],"whitelistLatin":["zzz"],"learnedReverts":{"слово":1},"layoutMemory":{},"snippets":{},"appRules":{},"domainBlacklist":[],"learnedWords":["word"]}"#
+        try old.write(to: dir.appendingPathComponent("userdata.json"), atomically: true, encoding: .utf8)
+        let s = Store(directory: dir)
+        XCTAssertEqual(s.data.whitelistLatin, ["zzz"])
+        XCTAssertEqual(s.data.learnedWords, ["word"])
+        XCTAssertEqual(s.data.learnedReverts["слово"], 1)
+        XCTAssertTrue(s.data.mentionApps.isEmpty)
+    }
+
+    func testDeferredLayoutMemoryReachesTheDisk() {
+        let dir = tempDir()
+        let s = Store(directory: dir)
+        s.rememberLayout(.en, bundleID: "com.apple.Safari", role: "url")
+        s.flush()
+        XCTAssertEqual(Store(directory: dir).recalledLayout(bundleID: "com.apple.Safari", role: "url"), .en)
+    }
+
+    // A deferred snapshot is older than a full save that follows it.
+    func testDeferredSnapshotDoesNotOverwriteALaterSave() {
+        let dir = tempDir()
+        let s = Store(directory: dir)
+        s.rememberLayout(.en, bundleID: "a", role: "")
+        s.updateData { $0.exceptions.insert("fetch") }
+        s.flush()
+        let again = Store(directory: dir)
+        XCTAssertTrue(again.data.exceptions.contains("fetch"))
+        XCTAssertEqual(again.recalledLayout(bundleID: "a", role: ""), .en)
+    }
+
+    func testManualConversionForgivesARevert() {
+        let s = Store(directory: tempDir())
+        s.recordRevert("гыук")
+        s.recordRevert("слово")
+        XCTAssertFalse(s.forgiveReverts(of: "гы"), "a fragment forgives nothing unless asked to")
+        XCTAssertTrue(s.forgiveReverts(of: "гы", prefix: true))
+        XCTAssertEqual(s.revertedWords(), ["слово"])
+        XCTAssertFalse(s.forgiveReverts(of: "с", prefix: true), "one letter is not evidence")
+        XCTAssertTrue(s.forgiveReverts(of: "СЛОВО"))
+        XCTAssertTrue(s.revertedWords().isEmpty)
+        XCTAssertFalse(s.forgiveReverts(of: ""))
+    }
+
+    // Stored the way the engine compares: without what surrounds the word.
+    func testRevertKeysMatchTheEngine() {
+        let s = Store(directory: tempDir())
+        s.recordRevert("ghbdtn,")
+        XCTAssertEqual(s.revertedWords(), ["ghbdtn"])
+        XCTAssertTrue(s.forgiveReverts(of: "ghbdtn."))
+        s.recordRevert("]]]")
+        XCTAssertEqual(s.revertedWords(), ["]]]"], "signs alone stay as they are")
+    }
+
+    func testMentionAppEarnsAndLosesTheRule() {
+        let s = Store(directory: tempDir())
+        XCTAssertFalse(s.isMentionApp("chat"))
+        for _ in 0..<2 { s.recordMentionFix(bundleID: "chat") }
+        XCTAssertFalse(s.isMentionApp("chat"))
+        s.recordMentionFix(bundleID: "chat")
+        XCTAssertTrue(s.isMentionApp("chat"))
+        for _ in 0..<40 { s.recordMentionFix(bundleID: "chat") }
+        for _ in 0..<3 { s.recordMentionRevert(bundleID: "chat") }
+        XCTAssertFalse(s.isMentionApp("chat"), "three reverts outweigh any record")
+        XCTAssertFalse(s.isMentionApp(nil))
+    }
+
+    func testMentionAppsSeedOnlyOnce() {
+        let s = Store(directory: tempDir())
+        s.seedMentionApps(["chat": 33, "": 5])
+        XCTAssertTrue(s.isMentionApp("chat"))
+        XCTAssertFalse(s.isMentionApp(""))
+        s.recordMentionRevert(bundleID: "chat")
+        s.seedMentionApps(["chat": 33, "other": 9])
+        XCTAssertFalse(s.isMentionApp("other"), "counters that exist are left alone")
+    }
+
     func testLayoutMemoryRoundTrip() {
         let s = Store(directory: tempDir())
         s.rememberLayout(.en, bundleID: "com.apple.Safari", role: "url")

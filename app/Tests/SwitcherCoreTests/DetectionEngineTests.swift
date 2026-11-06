@@ -206,4 +206,176 @@ final class DetectionEngineTests: XCTestCase {
         XCTAssertTrue(d.shouldConvert)
         XCTAssertEqual(d.converted, "делаю")
     }
+
+    // The comma key on the RU layout gives б.
+    func testCommaSlipAfterAKnownWord() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        XCTAssertEqual(e.evaluate("подготовьб").converted, "подготовь,")
+        XCTAssertEqual(e.evaluate("подготовьб").reason, .slipRepaired)
+        XCTAssertEqual(e.evaluate("Сообщениеб").converted, "Сообщение,")
+        XCTAssertEqual(e.evaluate("подготовьб").to, .ru, "no layout switch")
+    }
+
+    func testCommaSlipLeavesRealWordsAlone() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        for w in ["столб", "зуб", "клуб", "гроб", "озноб"] {
+            XCTAssertFalse(e.evaluate(w).shouldConvert, w)
+        }
+    }
+
+    // Our lists are small; the system speller is asked before a conversion. It can
+    // only stop one, and it stays out of the short words it mistakes for English.
+    func testSpellerStopsAConversionOfARealWord() {
+        let e = DetectionEngine(dictionaries: .from(ruWords: ["привет", "слово"], enWords: ["yard", "web"]))
+        XCTAssertTrue(e.evaluate("нфкв").shouldConvert, "precondition: the twin of \"yard\" is no word here")
+        e.ruWordOracle = { $0 == "нфкв" }
+        XCTAssertFalse(e.evaluate("нфкв").shouldConvert)
+    }
+
+    func testSpellerStaysOutOfShortWords() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        e.enWordOracle = { _ in true }
+        XCTAssertEqual(e.evaluate("z").converted, "я")
+        XCTAssertEqual(e.evaluate("ye").converted, "ну")
+        XCTAssertEqual(e.evaluate("tot").converted, "еще")
+    }
+
+    func testFourLettersOnENNeedARussianWord() {
+        let e = DetectionEngine(dictionaries: .from(ruWords: ["слово"], enWords: ["web"]))
+        e.ruWordOracle = { _ in false }
+        XCTAssertFalse(e.evaluate("zlhj").shouldConvert)
+        e.ruWordOracle = { $0 == "ядро" }
+        XCTAssertTrue(e.evaluate("zlhj").shouldConvert)
+    }
+
+    func testDrawnOutInterjectionsStay() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        for w in ["аааа", "ааааа", "нууу", "Нууу", "ыыыы", "агааа"] {
+            XCTAssertFalse(e.evaluate(w).shouldConvert, w)
+        }
+    }
+
+    // A short caps token on the EN layout is an abbreviation, unless it spells a
+    // Russian abbreviation.
+    func testShortCapsStayOnEnglishLayout() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        for w in ["DS", "LF", "CTR", "EVT", "OB"] { XCTAssertFalse(e.evaluate(w).shouldConvert, w) }
+        XCTAssertEqual(e.evaluate("GJ").converted, "ПО")
+    }
+
+    func testVsStaysInEnglishAndComesBackInRussian() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        XCTAssertFalse(e.evaluate("vs", typedLayout: .en, context: .en).shouldConvert)
+        XCTAssertEqual(e.evaluate("vs", typedLayout: .en, context: .ru).converted, "мы")
+    }
+
+    func testCapitalOnAPunctuationKey() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        XCTAssertEqual(e.evaluate("<eltn").converted, "Будет")
+        XCTAssertEqual(e.evaluate("{jhjij").converted, "Хорошо")
+        for w in [":smile", "{name", "<div", "~home", "<the"] {
+            XCTAssertFalse(e.evaluate(w).converted.contains(where: { $0.isCyrillic }), w)
+        }
+    }
+
+    // What stays when the capital rule asks for a real word behind the key.
+    func testMarkupOnPunctuationKeysStays() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        for w in ["<3", ":)", ":fire", "{}", "<br", "<SRE", "{V", ">U", ":LB"] {
+            XCTAssertFalse(e.evaluate(w).converted.contains(where: { $0.isCyrillic }), w)
+        }
+    }
+
+    // A cold speller must not be asked, and its silence must not convert anything.
+    func testNotReadySpellerStandsAside() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        var asked = 0
+        e.ruPrefixOracle = { _ in asked += 1; return false }
+        e.enPrefixOracle = { _ in asked += 1; return false }
+        e.ruWordOracle = { _ in asked += 1; return true }
+        e.enWordOracle = { _ in asked += 1; return false }
+        e.spellerReady = { false }
+        XCTAssertNil(e.evaluatePrefix("срф"))
+        XCTAssertNil(e.evaluatePrefixEN("Xth", context: nil))
+        XCTAssertNil(e.evaluateMention("\"тш"))
+        XCTAssertEqual(e.evaluate("ghbdtn").converted, "привет", "the dictionary path does not need it")
+        XCTAssertFalse(e.evaluate("zlhj").shouldConvert, "four letters on EN need it")
+        XCTAssertEqual(asked, 0)
+        e.spellerReady = { true }
+        XCTAssertNotNil(e.evaluatePrefix("срф"))
+    }
+
+    func testLoginBehindPunctuation() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        XCTAssertEqual(e.evaluate("@evs").reason, .login)
+        XCTAssertEqual(e.evaluate(",@evs").reason, .login)
+    }
+
+    func testWordsTypedWithoutYo() {
+        let e = DetectionEngine(dictionaries: .from(ruWords: ["отчётов", "слово"], enWords: ["web"]))
+        XCTAssertEqual(e.evaluate("jnxtnjd").converted, "отчетов")
+        XCTAssertEqual(e.evaluate("отчетов").reason, .typedIsValidWord)
+    }
+
+    // A refusal carries its score: a near miss can be told from a plain Russian word.
+    func testRefusalKeepsItsScore() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        let d = e.evaluate("зараженное")
+        XCTAssertEqual(d.reason, .belowThreshold)
+        XCTAssertGreaterThan(d.confidence, 0)
+    }
+
+    func testShortCapsOnEnglishLayoutInEveryContext() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        XCTAssertFalse(e.evaluate("VS", typedLayout: .en, context: .ru).shouldConvert)
+        XCTAssertFalse(e.evaluate("LF.", typedLayout: .en, context: .ru).shouldConvert)
+        XCTAssertEqual(e.evaluate("GJ.", typedLayout: .en, context: .ru).converted, "ПО.")
+    }
+
+    // A Russian abbreviation among Russian words, an English one among English ones.
+    func testAbbreviationFollowsTheContext() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        XCTAssertFalse(e.evaluate("WAF", typedLayout: .en, context: .en).shouldConvert)
+        XCTAssertEqual(e.evaluate("WAF", typedLayout: .en, context: .ru).converted, "ЦФА")
+        for w in ["CI", "CD", "PC", "DB"] {
+            XCTAssertFalse(e.evaluate(w, typedLayout: .en, context: .ru).shouldConvert, w)
+        }
+    }
+
+    func testOneLetterBesideMarkupStays() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        for w in [":D", "<b", "{c", "C#", "F#"] { XCTAssertFalse(e.evaluate(w).shouldConvert, w) }
+        XCTAssertEqual(e.evaluate("f,").converted, "а,", "a Russian word before a comma still converts")
+    }
+
+    // A dot inside a latin token is a domain or a file name, not the letter ю.
+    func testDomainsAndFilesStay() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        e.ruWordOracle = { _ in false }
+        for w in ["vk.com", "next.js", "index.js", "data.csv"] { XCTAssertFalse(e.evaluate(w).shouldConvert, w) }
+        XCTAssertEqual(e.evaluate("k.lb").converted, "люди", "a dictionary word with ю still converts")
+    }
+
+    // The speller splits "k.lb" and passes the pieces: that proves nothing.
+    func testSpellerIsNotAskedAboutPunctuatedTokens() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        e.enWordOracle = { _ in true }
+        XCTAssertEqual(e.evaluate("k.lb").converted, "люди")
+    }
+
+    // Nobody vouched for this cyrillic word: it stays.
+    func testColdSpellerDoesNotLetACorrectWordGo() {
+        let e = DetectionEngine(dictionaries: .from(ruWords: ["слово"], enWords: ["keys", "web"]))
+        e.ruWordOracle = { _ in true }
+        e.spellerReady = { false }
+        XCTAssertFalse(e.evaluate("луны").shouldConvert)
+    }
+
+    func testAcronymStartDoesNotTakeARussianWord() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        e.ruPrefixOracle = { _ in false }
+        XCTAssertNil(e.evaluatePrefix("куе"))
+        XCTAssertNil(e.evaluatePrefix("УЕФ"))
+        XCTAssertEqual(e.evaluatePrefix("КУЕ")?.converted, "RET")
+    }
 }

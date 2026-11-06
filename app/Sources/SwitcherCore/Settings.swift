@@ -149,8 +149,31 @@ public struct UserData: Codable, Sendable, Equatable {
     public var appRules: [String: AppRule] = [:]      // bundleID → per-app behaviour
     public var domainBlacklist: Set<String> = []      // browser hosts where the agent stands down (REL-6)
     public var learnedWords: Set<String> = []        // promoted to the dictionary
+    /// bundleID → how firmly a quote means "@" there: grows with manual "\"" → "@"
+    /// fixes, shrinks when the user turns an automatic "@" back into a quote.
+    public var mentionApps: [String: Int] = [:]
     // NB: the manual-fix tally is deliberately NOT stored here — it would write
     // raw typed words (incl. typos/secrets) to disk, violating SEC-2. The Store
     // keeps it in memory only and persists just the promoted `learnedWords`.
     public init() {}
+
+    /// Tolerant decoding, as in `Settings`: a file written by an older build lacks
+    /// any field added since, and a synthesized decoder would throw — `Store` would
+    /// then start from empty data and overwrite the whole lexicon on the next save.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = UserData()
+        func v<T: Decodable>(_ k: CodingKeys, _ fallback: T) -> T {
+            (try? c.decodeIfPresent(T.self, forKey: k)).flatMap { $0 } ?? fallback
+        }
+        exceptions      = v(.exceptions, d.exceptions)
+        whitelistLatin  = v(.whitelistLatin, d.whitelistLatin)
+        learnedReverts  = v(.learnedReverts, d.learnedReverts)
+        layoutMemory    = v(.layoutMemory, d.layoutMemory)
+        snippets        = v(.snippets, d.snippets)
+        appRules        = v(.appRules, d.appRules)
+        domainBlacklist = v(.domainBlacklist, d.domainBlacklist)
+        learnedWords    = v(.learnedWords, d.learnedWords)
+        mentionApps     = v(.mentionApps, d.mentionApps)
+    }
 }

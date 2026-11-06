@@ -4,7 +4,8 @@ import SwitcherCore
 
 /// Thin Accessibility helpers: read/replace the selection (REL-5), find the
 /// caret rectangle (caret overlay), and detect fullscreen (FR-31). Every call
-/// is best-effort and returns nil/false on failure — never blocks the input path.
+/// is best-effort and returns nil/false on failure. Each one waits for the other
+/// app, up to the 0.3 s cap, so the keystroke path must not make them routinely.
 enum AXText {
 
     static func focusedElement() -> AXUIElement? {
@@ -90,6 +91,10 @@ enum AXText {
 
     static func isFrontmostFullscreen() -> Bool {
         guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return false }
+        return isFullscreen(pid: pid)
+    }
+
+    static func isFullscreen(pid: pid_t) -> Bool {
         let app = AXUIElementCreateApplication(pid)
         var win: AnyObject?
         guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &win) == .success,

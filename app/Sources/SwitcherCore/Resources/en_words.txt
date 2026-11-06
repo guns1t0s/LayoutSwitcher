@@ -472,6 +472,7 @@ breaks
 breast
 breath
 breeze
+brew
 bribery
 brick
 bridge
@@ -615,6 +616,7 @@ cats
 caught
 caulk
 cause
+cd
 cellar
 cement
 center
@@ -684,6 +686,7 @@ choosing
 chose
 chosen
 church
+ci
 cipher
 circuit
 circulation
@@ -819,7 +822,11 @@ confluence
 confrontation
 congrats
 congratulations
+connect
+connected
+connection
 connector
+connects
 consider
 considerable
 considered
@@ -974,6 +981,7 @@ daughter
 dawn
 day
 days
+db
 dead
 deadline
 deadlines
@@ -1143,6 +1151,7 @@ division
 dizzy
 dns
 do
+doc
 dock
 docker
 docs
@@ -1362,6 +1371,7 @@ excited
 exciting
 exclude
 excretion
+exe
 execute
 executed
 execution
@@ -1787,6 +1797,7 @@ hand
 handle
 handler
 handlers
+handoff
 hands
 handsome
 hang
@@ -2336,6 +2347,7 @@ made
 magistrate
 magnesium
 magnet
+mail
 main
 mainly
 maintain
@@ -2590,6 +2602,7 @@ nephew
 nerve
 nervous
 nest
+net
 network
 networks
 neurology
@@ -2848,6 +2861,7 @@ payment
 payments
 payroll
 pays
+pc
 peace
 peak
 pebble
@@ -4405,6 +4419,7 @@ vomit
 voucher
 vow
 vpn
+vs
 vulnerabilities
 vulnerability
 wage

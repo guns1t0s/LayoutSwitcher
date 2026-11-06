@@ -73,6 +73,9 @@ codesign -d -r- "$APP" 2>&1 | grep -i "designated" || true
 echo "==> self-test"
 "$APP/Contents/MacOS/LayoutSwitcher" --selftest
 
+echo "==> simulated typing"
+"$APP/Contents/MacOS/LayoutSwitcher" --simulate
+
 echo ""
 echo "Built: $APP"
 echo "Run:   open \"$APP\"   (grant Accessibility + Input Monitoring on first launch)"

@@ -130,15 +130,12 @@ public enum TextFixes {
     /// caret sits after whitespace or the run holds no letters — there is then
     /// nothing meaningful to convert. Used by the manual fix when the typing
     /// buffer is empty (the user clicked into existing text and pressed ⇧⇧).
+    /// `caret` is a UTF-16 offset, as Accessibility reports it: counting Characters
+    /// instead put it past the real caret after every emoji to its left.
     public static func wordBeforeCaret(in text: String, caret: Int) -> String? {
-        let chars = Array(text)
-        let end = max(0, min(caret, chars.count))
-        guard end > 0 else { return nil }
-        var start = end
-        while start > 0, !chars[start - 1].isWhitespace { start -= 1 }
-        guard start < end else { return nil }
-        let word = String(chars[start..<end])
-        return word.contains(where: { $0.isLetter }) ? word : nil
+        let end = String.Index(utf16Offset: max(0, min(caret, text.utf16.count)), in: text)
+        let word = text[..<end].reversed().prefix { !$0.isWhitespace }.reversed()
+        return word.contains(where: { $0.isLetter }) ? String(word) : nil
     }
 }
 

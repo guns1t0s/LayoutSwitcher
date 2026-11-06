@@ -3,7 +3,7 @@ import Foundation
 /// One recorded switching action — enough context to spot a false trigger later.
 public struct LoggedEvent: Codable, Equatable, Sendable {
     public var t: Double           // epoch seconds (wall clock)
-    public var kind: String        // auto | doubleShift | phantom | undo | blocked
+    public var kind: String        // auto | doubleShift | phantom | undo | undo-cancelled | fix-ignored | blocked
     public var branch: String      // for doubleShift: which fix() path; else ""
     public var original: String    // text as typed (on screen)
     public var converted: String   // text after the action ("" for phantom/blocked)
@@ -34,6 +34,7 @@ public final class EventLog: @unchecked Sendable {
     private let cap: Int
     private let q = DispatchQueue(label: "com.oateplov.layoutswitcher.eventlog")
     private var events: [LoggedEvent]
+    private var flushArmed = false
 
     /// Gate set from Settings.logHistory. When false, `record` is a no-op.
     public var enabled: Bool
@@ -54,9 +55,18 @@ public final class EventLog: @unchecked Sendable {
         q.async { [self] in
             events.append(e)
             if events.count > cap { events.removeFirst(events.count - cap) }
-            flush()
+            // The whole file is rewritten, 44 ms of CPU each: a burst shares one write.
+            guard !flushArmed else { return }
+            flushArmed = true
+            q.asyncAfter(deadline: .now() + 1) { [self] in
+                flushArmed = false
+                flush()
+            }
         }
     }
+
+    /// Write out what is pending (at quit, and for readers of the file).
+    public func flushNow() { q.sync { flush() } }
 
     public func all() -> [LoggedEvent] { q.sync { events } }
 
@@ -100,9 +110,10 @@ public final class EventLog: @unchecked Sendable {
         var out = "LayoutSwitcher история — \(all.count) событий\n"
         out += "Сводка: " + byKind.sorted { $0.value > $1.value }
             .map { "\($0.key)=\($0.value)" }.joined(separator: " ") + "\n"
-        let undos = byKind["undo"] ?? 0
+        let undos = (byKind["undo"] ?? 0) - (byKind["undo-cancelled"] ?? 0)
         let phantoms = byKind["phantom"] ?? 0
-        out += "Сигналы: откатов(=ложные)=\(undos)  фантомных ⇧⇧=\(phantoms)\n"
+        let ignored = byKind["fix-ignored"] ?? 0
+        out += "Сигналы: откатов(=ложные)=\(max(undos, 0))  фантомных ⇧⇧=\(phantoms)  ⇧⇧ вслед за конверсией=\(ignored)\n"
         let topApps = byApp.sorted { $0.value > $1.value }.prefix(5)
         if !topApps.isEmpty {
             out += "Приложения: " + topApps.map { "\(short($0.key))=\($0.value)" }.joined(separator: " ") + "\n"
@@ -134,6 +145,10 @@ public final class EventLog: @unchecked Sendable {
             body = "гард \(e.reason): \"\(e.original)\" не обработано"
         case "blocked":  body = "⇧⇧ заблокировано: \(e.reason)"
         case "undo":     body = "ОТКАТ \"\(e.original)\" → \"\(e.converted)\""
+        case "undo-cancelled": body = "откат отменен: \"\(e.original)\" снова сконвертировано вручную"
+        case "fix-ignored": body = "⇧⇧ вслед за конверсией \"\(e.original)\" - пропущено"
+        case "arrival":  body = "вход в приложение: \(e.reason), раскладка \(e.to.isEmpty ? "не задана" : e.to.uppercased())"
+        case "raced":    body = "конверсия \"\(e.original)\" → \"\(e.converted)\" не успела, текст не менялся"
         case "doubleShift": body = "⇧⇧ \(e.branch): \"\(e.original)\" → \"\(e.converted)\""
         default:         body = "авто \"\(e.original)\" → \"\(e.converted)\" [\(e.reason) \(String(format: "%.2f", e.confidence))]"
         }

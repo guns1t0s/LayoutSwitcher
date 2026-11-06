@@ -24,7 +24,12 @@ public final class LanguageModel: @unchecked Sendable {
         let normalized = rawWords
             .map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        self.words = Set(normalized)
+        // Russian is typed without ё, while the lists spell it: "отчётов" alone left
+        // "отчетов" an unknown word. Every form also goes in with е.
+        let plain = layout == .ru
+            ? normalized.filter { $0.contains("ё") }.map { $0.replacingOccurrences(of: "ё", with: "е") }
+            : []
+        self.words = Set(normalized + plain)
         self.vocab = (layout == .ru) ? 34 : 28      // letters + boundary symbol
         self.unkLogProb = log(1.0 / vocab)
         buildNgrams(from: normalized)

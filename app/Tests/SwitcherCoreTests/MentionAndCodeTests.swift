@@ -8,6 +8,49 @@ import AppKit
 final class MentionTests: XCTestCase {
     private let e = DetectionEngine(dictionaries: .loadBundled())
 
+    // Where a lone quote is a mention: the user's own posts, 09.2026 on.
+    func testQuotePositions() {
+        for text in ["", "\n", "готово\n", "готово\n  ", "- ", "готово\n- ", "@user ", "@user1 @user2 ",
+                     "сс ", "cc ", "CC ", "fyi "] {
+            XCTAssertTrue(DetectionEngine.quoteStartsMention(before: text), text)
+        }
+        // In the middle of a sentence it stays a guess, and glued to a word it is a
+        // closing quote or a typo.
+        for text in ["статус ", "кнопка ", "готово", "сс", "@user", "(", "статус - ", "готово\nстатус "] {
+            XCTAssertFalse(DetectionEngine.quoteStartsMention(before: text), text)
+        }
+    }
+
+    func testLoneQuoteConvertsToAtSign() {
+        let d = e.mentionFromQuote()
+        XCTAssertEqual(d.converted, "@")
+        XCTAssertEqual(d.reason, .mention)
+        XCTAssertEqual(d.to, .en)
+    }
+
+    // "@" with Russian letters behind it has no Russian reading.
+    func testAtSignWithRussianLetters() {
+        XCTAssertEqual(e.evaluateMention("@г")?.converted, "@u")
+        XCTAssertEqual(e.evaluateMention("@гыук")?.converted, "@user")
+        XCTAssertNil(e.evaluateMention("@"))
+        XCTAssertNil(e.evaluateMention("@user"))
+        XCTAssertNil(e.evaluateMention("@тб"), "б lands on punctuation: not a login")
+    }
+
+    func testRevertedLoginStaysTyped() {
+        let e = DetectionEngine(dictionaries: .loadBundled())
+        e.learnedReverts = ["гыук"]
+        XCTAssertNil(e.evaluateMention("@гы"))
+        XCTAssertNil(e.evaluateMention("\"гы"))
+    }
+
+    // A login is not a word on the other layout, whatever its letters spell.
+    func testLatinLoginStaysItself() {
+        XCTAssertEqual(KeyMap.convert("evs", to: .ru), "умы", "precondition")
+        let d = e.evaluate("@evs")
+        XCTAssertFalse(d.shouldConvert)
+    }
+
     func testMentionsFromHistory() {
         for (typed, expect) in ["\"ы": "@s", "\"ь": "@m", "\"тш": "@ni", "\"дф": "@la",
                                 "\"лф": "@ka", "\"зщ": "@po", "\"фк": "@ar"] {

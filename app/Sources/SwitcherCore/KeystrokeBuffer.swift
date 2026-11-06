@@ -20,21 +20,28 @@ public final class KeystrokeBuffer {
 
     /// Symbols that attach to a word rather than ending it: @mentions, #hashtags,
     /// snake_case, and their RU-layout twins (Shift+2 → ", Shift+3 → №). Keeping
-    /// them in the token lets conversion flip "гыук → @user" whole.
+    /// them in the token lets conversion flip "\"гыук → @user" whole.
     private static let wordSymbols: Set<Character> = ["@", "#", "_", "\"", "№"]
 
     /// Punctuation that is actually a Russian LETTER on the same physical key
-    /// (б→"," ж→";" х→"[" ъ→"]" э→"'" ё→"`" ю→"."). When a Russian word is typed
+    /// (б→"," ж→";" х→"[" ъ→"]" э→"'" ё→"`" or "\\" ю→"."). When a Russian word is typed
     /// in the wrong (EN) layout these appear mid-word; treating them as
     /// boundaries fragmented the word ("обратно"→"j,hfnyj" split at the comma)
     /// so it never converted. Keep them inside the token instead. Leading/trailing
     /// ones are preserved unconverted by the DetectionEngine (real punctuation).
-    private static let softPunct: Set<Character> = [",", ".", ";", "'", "[", "]", "`"]
+    private static let softPunct: Set<Character> = [",", ".", ";", "'", "[", "]", "`", "\\"]
+
+    /// Shift with a key that is a Russian letter: Ж Б Ю Х on the EN layout. Mid-word
+    /// they are punctuation, as they look. As the FIRST character they may be the
+    /// capital of a sentence typed on the wrong layout: ":tyobyf" is "Женщина", and
+    /// as a boundary the ":" stayed behind, in front of "енщина".
+    public static let shiftedLetters: Set<Character> = [":", "<", ">", "{"]
 
     /// Characters that end a word.
     private func isBoundary(_ c: Character) -> Bool {
         if KeystrokeBuffer.wordSymbols.contains(c) { return false }
         if KeystrokeBuffer.softPunct.contains(c) { return false }
+        if word.isEmpty, KeystrokeBuffer.shiftedLetters.contains(c) { return false }
         return c == " " || c == "\n" || c == "\t" || c == "\r"
             || c.isPunctuation || c.isSymbol
     }

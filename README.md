@@ -13,9 +13,12 @@ sets the right layout before you type, and never touches the network.
 - **Auto‑convert** a word typed in the wrong layout (`ghbdtn ` → `привет `) using
   frequency dictionaries + a character‑trigram model, only at high confidence —
   never on doubt. English typed on the RU layout is caught mid‑word as soon as its
-  first letters cannot start a Russian word (`срф` → `cha…`), mentions as soon as
-  the letters after `"` cannot (`"тш` → `@ni…`); caps acronyms and codes convert
-  from a curated list (`СУЩ` → `CEO`, `Й4` → `Q4`).
+  first letters cannot start a Russian word (`срф` → `cha…`), Russian typed on the
+  EN layout as soon as its letters cannot start an English word (`Xth` → `Чер…`),
+  mentions as soon as the letters after `"` cannot (`"тш` → `@ni…`), or at once at
+  the start of a line in an app where you keep fixing them; caps acronyms and codes
+  convert from a curated list (`СУЩ` → `CEO`, `Й4` → `Q4`). After a mention the
+  layout goes back, however the login was finished.
 - **Proactive layout** before you type: per‑app / per‑field memory, latin for
   url / search / password fields.
 - **One‑key correction loop**: fix the last word (`⌃⌥Z`), repeat to cycle back;
@@ -36,12 +39,22 @@ sets the right layout before you type, and never touches the network.
 
 ```bash
 cd app
-swift test                      # 66 unit tests (engine, mapping, buffer, store, text tools)
+swift test                      # unit tests (engine, mapping, buffer, store, text tools)
 
 bash scripts/make_cert.sh       # ONCE: stable self‑signed identity so macOS
                                 # permission grants survive rebuilds
-bash scripts/build_app.sh       # → dist/LayoutSwitcher.app (+ headless self‑test)
+bash scripts/build_app.sh       # → dist/LayoutSwitcher.app (+ self‑test and simulated typing)
 open dist/LayoutSwitcher.app
+```
+
+`build_app.sh` also types a set of scenarios through the real coordinator into a
+model of a text field (`LayoutSwitcher --simulate`, no permissions needed). The same
+scenarios run live, with real key events into a window of the app's own, on a
+throwaway data directory: quit the running app, unlock the screen, then
+
+```bash
+open dist/LayoutSwitcher.app --args --livecheck /tmp/livecheck.txt
+open dist/LayoutSwitcher.app    # a moment later: brings its window to the front
 ```
 
 On first launch grant **two** permissions, then quit & relaunch:
@@ -85,8 +98,20 @@ Exceptions / whitelist / learned reverts short‑circuit everything above.
 Mid‑word, a word still being typed on the RU layout converts to English only when
 no Russian word the app knows starts with its letters (bundled lists, your local
 lexicon, and the system Russian spell checker) and the latin form starts an
-English word or a curated term. A manual revert of any conversion is learned, so
-the same word is never converted again.
+English word or a curated term. The other way the bar is higher, since logins and
+identifiers are typed on EN: no English word or curated term starts with the
+letters, the Russian form starts a known word, four letters or a capital, no
+English text around, and never in a terminal or an editor.
+
+A manual revert of a conversion is learned, so the same word is not converted
+again, until you convert that word by hand yourself: then the revert is dropped.
+A `⇧⇧` within a second of a conversion is ignored, it was aimed at the word as it
+looked before. A word finished by Return or Tab stays as typed: the key has already
+reached the app, and rewriting after it could hit the wrong place.
+
+Keyboard tables are read from the layouts this Mac really has (the macOS `Russian`
+layout differs from `Russian – PC` outside the letters), and every keystroke is
+read in the layout that is active now, not the one the keyboard event remembers.
 
 ## Privacy
 
@@ -95,7 +120,8 @@ is ephemeral and wiped at every boundary; only your settings and lexicons are st
 locally under `~/Library/Application Support/LayoutSwitcher/`. The switching
 history (`events.json`, off by default, menu → История) and the personal lexicon
 mined from it (`user_ru_words.txt`) contain words you typed, so they stay there and
-never go into the repository.
+never go into the repository. A word typed in a password field, a turned‑off app or a
+listed domain is not recorded at all, and does not reach the system spell checker.
 
 ## Project layout
 

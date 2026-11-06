@@ -28,6 +28,7 @@ final class EventLogTests: XCTestCase {
         log.record(ev("undo", "привет"))
         XCTAssertEqual(log.count(), 2)
         // A fresh instance over the same dir reloads from disk.
+        log.flushNow()
         let reopened = EventLog(directory: dir, enabled: true)
         XCTAssertEqual(reopened.count(), 2)
         XCTAssertEqual(reopened.all().first?.original, "ghbdtn")

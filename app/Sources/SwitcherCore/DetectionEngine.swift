@@ -23,6 +23,7 @@ public enum DetectionReason: String, Sendable {
     case brackets                // "хъ" typed on the RU layout where "[]" was meant
     case ambiguousResolved       // valid both ways, resolved by frequency + context
     case morphology              // OOV, but a plausible inflection of a known stem
+    case login                   // latin token behind "@": a login, whatever it spells
 }
 
 public struct Decision: Sendable, Equatable {
@@ -94,7 +95,7 @@ public final class DetectionEngine: @unchecked Sendable {
         if d.shouldConvert { return false }              // wrong-layout image
         switch d.reason {
         case .typedIsValidWord, .ambiguousBothValid, .excepted, .whitelistedLatin, .acronym, .slipRepaired,
-             .capsGuard, .idCode, .early, .mention, .brackets:
+             .capsGuard, .idCode, .early, .mention, .brackets, .login:
             return false                                  // already known / conflicted
         default:
             return true                                   // genuinely new vocabulary
@@ -148,7 +149,8 @@ public final class DetectionEngine: @unchecked Sendable {
     public static func repairInnerZh(_ s: String) -> String {
         var c = Array(s)
         guard c.count >= 3 else { return s }
-        for i in 1..<(c.count - 1) where c[i] == ";" && c[i - 1].isCyrillic && c[i + 1].isCyrillic {
+        // ⇧4 comes out as ";" on Russian – PC and as "%" on the macOS Russian layout.
+        for i in 1..<(c.count - 1) where (c[i] == ";" || c[i] == "%") && c[i - 1].isCyrillic && c[i + 1].isCyrillic {
             c[i] = "ж"
         }
         return String(c)
@@ -177,6 +179,16 @@ public final class DetectionEngine: @unchecked Sendable {
         return (out, ruCore)
     }
 
+    /// "подготовьб" → "подготовь,": on the macOS Russian layout the comma is ⇧6, and
+    /// the key where English keeps it gives б. Six manual retypes in ten days, all
+    /// of them a known word followed by б. A stem of five letters or more only:
+    /// the shorter ones are where real words live ("зуб", "столб", "колб").
+    static func repairCommaSlip(_ token: String, core: String) -> String? {
+        guard core.count >= 6, core.last == "б", core.allSatisfy({ $0.isCyrillic && $0.isLetter }),
+              let r = token.range(of: core) else { return nil }
+        return String(token[..<r.lowerBound]) + core.dropLast() + "," + String(token[r.upperBound...])
+    }
+
     // MARK: - Early (mid-word) conversion
 
     /// Shortest prefix early conversion may act on, and the n-gram gap it needs.
@@ -188,6 +200,26 @@ public final class DetectionEngine: @unchecked Sendable {
     /// bundled dictionary alone let "пше" through to "git" — "пшеница" is not in
     /// it; neither were "рун…" (Рунет) or "суте…" (сутенер).
     public var ruPrefixOracle: ((String) -> Bool)?
+    /// The same question for English ("can these letters still start a word?"),
+    /// asked of `evaluatePrefixEN`'s candidates before they turn Russian.
+    public var enPrefixOracle: ((String) -> Bool)?
+    /// "Is this a correct word of that language?" from the system spell checker, the
+    /// last check before a dictionary or n-gram conversion. Our lists are small: a
+    /// replay over real chat text turned "штук" into "iner" and "exe" into "учу".
+    public var ruWordOracle: ((String) -> Bool)?
+    public var enWordOracle: ((String) -> Bool)?
+    /// May the speller be asked right now? Its answer comes from another process,
+    /// and a cold one blocks the caller, here the keyboard, for hundreds of ms. When
+    /// not, nothing that needed its word is rewritten: the mid-word rules stand aside,
+    /// and so does a boundary rewrite of cyrillic text. Latin text keeps converting by
+    /// the dictionaries alone, or "ghbdtn" would wait for the first answer of the day.
+    public var spellerReady: () -> Bool = { true }
+    /// Gap the EN→RU direction needs. Higher than the other way: on the EN layout
+    /// people also type logins and identifiers no dictionary knows.
+    public var earlyRuMinMargin = 1.0
+    /// Lowercase letters needed in that direction. Three lowercase letters are
+    /// what abbreviations look like ("pdf", "rfc", "cfg"); a capital starts a sentence.
+    public var earlyRuMinLowercase = 4
 
     private lazy var ruPrefixes: Set<String> = dicts.model(for: .ru).prefixSet(minLength: earlyMinLength)
     private lazy var enPrefixes: Set<String> = dicts.model(for: .en).prefixSet(minLength: earlyMinLength)
@@ -213,6 +245,17 @@ public final class DetectionEngine: @unchecked Sendable {
     /// checker know a Russian word starting with them. The twin must be a login
     /// (latin letters / digits). A reverted or excepted prefix blocks it.
     public func evaluateMention(_ token: String) -> Decision? {
+        // "@" already there, Russian letters behind it: the layout flipped under the
+        // login. No Russian reading exists, so the first letter is enough.
+        if token.first == "@" {
+            let letters = String(token.dropFirst())
+            guard !letters.isEmpty, letters.allSatisfy({ $0.isCyrillic && $0.isLetter }),
+                  !learnedReverts.contains(where: { $0.hasPrefix(letters.lowercased()) }) else { return nil }
+            let twin = KeyMap.convert(letters, to: .en)
+            guard twin.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else { return nil }
+            return Decision(shouldConvert: true, from: .ru, to: .en, original: token,
+                            converted: "@" + twin, confidence: 1.0, reason: .mention)
+        }
         guard token.first == "\"" else { return nil }
         let core = String(token.dropFirst())
         // Logins are lowercase and give themselves away in the first letters (the
@@ -231,11 +274,34 @@ public final class DetectionEngine: @unchecked Sendable {
         } else {
             if lc.count == 2 ? ruHeads.contains(lc) : ruPrefixes.contains(lc) { return nil }
             if starts(learnedWords) { return nil }
-            if let oracle = ruPrefixOracle, oracle(lc) { return nil }
+            if let oracle = ruPrefixOracle, !spellerReady() || oracle(lc) { return nil }
         }
         return Decision(shouldConvert: true, from: .ru, to: .en, original: token,
                         converted: KeyMap.convert(token, to: .en),
                         confidence: 0.9, reason: .mention)
+    }
+
+    /// Is a quote typed right after `text` (what precedes the caret) a mention?
+    ///
+    /// A lone quote is the most frequent manual fix there is (36 of 105 in ten
+    /// days), and it cannot wait for letters: the user wants "@" to open the
+    /// autocomplete. In the middle of a sentence it stays a guess, the user's own
+    /// posts have 936 mentions against 207 quotes there. But at the start of a
+    /// message it is 590 against 5, at the start of a line 93 against 1, right after
+    /// a mention 113 against 0, after "cc" 32 against 0.
+    public static func quoteStartsMention(before text: String) -> Bool {
+        let line = text.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? ""
+        let tail = line.trimmingCharacters(in: .whitespaces)
+        if tail.isEmpty || tail == "-" { return true }
+        guard line.last?.isWhitespace == true,
+              let last = tail.split(whereSeparator: { $0.isWhitespace }).last?.lowercased() else { return false }
+        return last.hasPrefix("@") || last == "cc" || last == "сс" || last == "fyi"
+    }
+
+    /// The conversion of a quote that `quoteStartsMention` called a mention.
+    public func mentionFromQuote() -> Decision {
+        Decision(shouldConvert: true, from: .ru, to: .en, original: "\"", converted: "@",
+                 confidence: 0.9, reason: .mention)
     }
 
     /// Decide whether a word STILL BEING TYPED in the Russian layout is really an
@@ -260,9 +326,17 @@ public final class DetectionEngine: @unchecked Sendable {
     public func evaluatePrefix(_ token: String) -> Decision? {
         // "хъ" starts no Russian word: it is "[]" typed on the RU layout (six
         // manual fixes, all followed by Russian text — so no layout switch).
-        if token == "хъ" || token == "ХЪ" {
+        if token == "хъ" || token == "ХЪ", !isRefused(token.lowercased()) {
             return Decision(shouldConvert: true, from: .ru, to: .en, original: token,
                             converted: token == "хъ" ? "[]" : "{}", confidence: 1.0, reason: .brackets)
+        }
+        // The code fence on the key left of 1. The macOS Russian layout gives "]"
+        // there, so "```" comes out as "]]]" (fixed by hand three times in ten days,
+        // and the fix did nothing before the real layouts were installed). Nothing
+        // else types three of them on this layout. Russian follows: no switch.
+        if token == "]]]", KeyMap.convert(token, to: .en) == "```", !isRefused(token) {
+            return Decision(shouldConvert: true, from: .ru, to: .en, original: token,
+                            converted: "```", confidence: 1.0, reason: .brackets)
         }
         // A code with a digit that EXACTLY spells a curated term ("Й4" → Q4,
         // "ы3" → s3): no Russian reading, and the list decides — fixed by hand
@@ -293,8 +367,10 @@ public final class DetectionEngine: @unchecked Sendable {
         let twin = KeyMap.convert(core, to: .en)
         guard twin.allSatisfy({ $0.isASCII && $0.isLetter }) else { return nil }
         let tl = twin.lowercased()
+        // In lowercase an acronym counts only whole: "куе" is the start of "кует", not
+        // of RETN. In caps its beginning will do, Russian is not typed that way.
         let curated = whitelistLatin.contains { $0.hasPrefix(tl) }
-            || dicts.acronymsEN.contains { $0.hasPrefix(tl) }
+            || (Self.isAllCapsWord(core) ? dicts.acronymsEN.contains { $0.hasPrefix(tl) } : dicts.acronymsEN.contains(tl))
             || learnedWords.contains { $0.hasPrefix(tl) }
         if Self.isAllCapsWord(core) {
             guard curated else { return nil }
@@ -303,10 +379,42 @@ public final class DetectionEngine: @unchecked Sendable {
             let margin = dicts.model(for: .en).scorePrefix(tl) - dicts.model(for: .ru).scorePrefix(lc)
             guard margin >= earlyMinMargin else { return nil }
         }
-        if let oracle = ruPrefixOracle, oracle(lc) { return nil }
+        if let oracle = ruPrefixOracle, !spellerReady() || oracle(lc) { return nil }
         return Decision(shouldConvert: true, from: .ru, to: .en, original: token,
                         converted: KeyMap.convert(token, to: .en),
                         confidence: 0.9, reason: .early)
+    }
+
+    /// The mirror of `evaluatePrefix`: Russian typed on the EN layout, caught before
+    /// its boundary. The user fixes those by hand after 3-5 letters ("Xth" → "Чер",
+    /// "Dkf" → "Вла", "Gth" → "Пер"), mostly in the browser's search field, which the
+    /// app itself sets to EN. A wrong call here costs more than the other way, since
+    /// logins and identifiers are typed on EN, so the bar is higher; all required:
+    ///  - plain letters, at most the first one a capital (no acronyms, no camelCase),
+    ///    and four of them unless they start with a capital;
+    ///  - the surrounding text is not English;
+    ///  - no English word, curated term, exception or revert starts with them;
+    ///  - the Russian twin starts a Russian word the app knows;
+    ///  - it reads clearly more Russian than English (`earlyRuMinMargin`);
+    ///  - the system English speller knows no word starting with them.
+    public func evaluatePrefixEN(_ token: String, context: Layout?) -> Decision? {
+        guard context != .en, let first = token.first,
+              token.count >= (first.isUppercase ? earlyMinLength : earlyRuMinLowercase),
+              token.allSatisfy({ $0.isASCII && $0.isLetter }),
+              token.dropFirst().allSatisfy({ $0.isLowercase }) else { return nil }
+        let lc = token.lowercased()
+        if enPrefixes.contains(lc) { return nil }
+        func starts(_ set: Set<String>, _ p: String) -> Bool { set.contains { $0.hasPrefix(p) } }
+        if starts(whitelistLatin, lc) || starts(dicts.acronymsEN, lc) || starts(learnedWords, lc)
+            || starts(exceptions, lc) || starts(learnedReverts, lc) { return nil }
+        let twin = KeyMap.convert(lc, to: .ru)
+        guard twin.allSatisfy({ $0.isCyrillic && $0.isLetter }), ruPrefixes.contains(twin),
+              !starts(learnedReverts, twin), !starts(exceptions, twin) else { return nil }
+        let margin = dicts.model(for: .ru).scorePrefix(twin) - dicts.model(for: .en).scorePrefix(lc)
+        guard margin >= earlyRuMinMargin else { return nil }
+        if let oracle = enPrefixOracle, !spellerReady() || oracle(lc) { return nil }
+        return Decision(shouldConvert: true, from: .en, to: .ru, original: token,
+                        converted: KeyMap.convert(token, to: .ru), confidence: 0.9, reason: .early)
     }
 
     /// n-gram gap for a prefix (diagnostics / tuning).
@@ -320,7 +428,7 @@ public final class DetectionEngine: @unchecked Sendable {
                          typedLayout: Layout? = nil,
                          context: Layout? = nil) -> Decision {
 
-        let core = token.trimmingCharacters(in: punctuation)
+        let core = token.trimmingCharacters(in: Self.outerCharacters)
         let lc = core.lowercased()
 
         // Layout the token currently reads as. Trust the SCRIPT of the text
@@ -348,6 +456,12 @@ public final class DetectionEngine: @unchecked Sendable {
         // the layout without actually rewriting text.
         if fullConverted == token {
             return .noop(token, layout: current, reason: .typedIsValidWord)
+        }
+
+        // A latin token behind "@" is a login, whatever its letters spell on the
+        // other layout: "@evs" came out as "\"умы" because "умы" is a word.
+        if current == .en, token.drop(while: { Self.softPunct.contains($0) }).first == "@" {
+            return .noop(token, layout: current, reason: .login)
         }
 
         // --- Hard lexicon gates -------------------------------------------------
@@ -483,13 +597,18 @@ public final class DetectionEngine: @unchecked Sendable {
         // FULL token (outer punct included as letters) yields a dictionary word,
         // prefer that reading; "ghbdtn." still falls through ("приветю" is no
         // word) and keeps its real period.
-        if token != core {
+        // A capital on a punctuation key (":tyobyf") needs a real word behind it:
+        // "<SRE", "{V" and ":LB" are markup and names, not "БЫКУ" or "ХМ".
+        let shiftedCapital = token.first.map { KeystrokeBuffer.shiftedLetters.contains($0) } ?? false
+        // Nor is a short caps token's period the letter ю: "LF." is not "ДАю".
+        let shortCaps = current == .en && Self.isAllCapsWord(core) && core.letterCount <= 4
+        if token != core, !shortCaps, !shiftedCapital || (core.count >= 3 && core.allSatisfy { $0.isLowercase }) {
             let fullAlt = KeyMap.convert(token, to: target)
             // Guard against corrupting correct current-layout text that merely
             // isn't in our (smaller) current dictionary: the alt reading must be
             // a dictionary word AND genuinely more native by the n-gram margin.
             if altModel.contains(fullAlt.lowercased()) && !curModel.contains(lc),
-               altModel.score(fullAlt.lowercased()) - curModel.score(lc) > 0 {
+               altModel.score(fullAlt.lowercased()) - curModel.score(lc) > 0, !spellerKnows(lc, current) {
                 return Decision(shouldConvert: true, from: current, to: target,
                                 original: token, converted: fullAlt,
                                 confidence: 1.0, reason: .altIsWord)
@@ -512,6 +631,14 @@ public final class DetectionEngine: @unchecked Sendable {
         let curIsWord = curModel.contains(lc) || learnedWords.contains(lc)
         let altIsWord = altModel.contains(altLC) || learnedWords.contains(altLC)
 
+        if !curIsWord, !altIsWord, current == .ru,
+           let fixed = Self.repairCommaSlip(token, core: core),
+           curModel.contains(String(lc.dropLast())) || learnedWords.contains(String(lc.dropLast())) {
+            return Decision(shouldConvert: true, from: .ru, to: .ru,
+                            original: token, converted: fixed,
+                            confidence: 1.0, reason: .slipRepaired)
+        }
+
         // --- Dictionary decisions (high confidence) -----------------------------
         if curIsWord && !altIsWord {
             return .noop(token, layout: current, reason: .typedIsValidWord)
@@ -523,7 +650,19 @@ public final class DetectionEngine: @unchecked Sendable {
         if altIsWord && !curIsWord, current == .ru, Self.isAllCapsWord(core), core.letterCount <= 4 {
             return .noop(token, layout: current, reason: .capsGuard)
         }
+        // The same on the EN layout: "VS", "DS", "CTR" are not "МЫ", "ВЫ", "СЕК". Only
+        // a Russian abbreviation may come out of a short caps token there, and not
+        // among English: "WAF" next to English words is not "ЦФА".
+        if altIsWord, current == .en, Self.isAllCapsWord(core), core.letterCount <= 4,
+           !dicts.acronymsRU.contains(altLC) || context == .en {
+            return .noop(token, layout: current, reason: .capsGuard)
+        }
         if altIsWord && !curIsWord {
+            // One letter beside a markup sign is markup: ":D", "<b>", "C#".
+            if core.letterCount == 1, shiftedCapital || token.contains("#") {
+                return .noop(token, layout: current, reason: .tooShort)
+            }
+            if spellerKnows(lc, current) { return .noop(token, layout: current, reason: .typedIsValidWord) }
             return Decision(shouldConvert: true, from: current, to: target,
                             original: token, converted: fullConverted,
                             confidence: 1.0, reason: .altIsWord)
@@ -556,7 +695,14 @@ public final class DetectionEngine: @unchecked Sendable {
         // A real word never carries a shifted-number symbol between two letters
         // ("ye$yj", "так;е"). If that is what converting produces, the token is not a
         // wrong-layout word — refuse before the n-gram gets a vote on garbage.
+        // The same goes for a Russian word with ж, whose other reading has ";" inside.
         if Self.hasInnerSymbol(altForm) {
+            return Decision(shouldConvert: false, from: current, to: current, original: token,
+                            converted: token, confidence: 0.01, reason: .belowThreshold)
+        }
+        // Three of a letter in a row is a drawn-out interjection ("нууу", "аааа"),
+        // and the n-gram has nothing to say about it: those came out as "yeee", "ffff".
+        if Self.hasTripleLetter(lc) {
             return .noop(token, layout: current, reason: .belowThreshold)
         }
         var margin = altModel.score(altLC) - curModel.score(lc)
@@ -568,7 +714,15 @@ public final class DetectionEngine: @unchecked Sendable {
         // Require a CLEAR gap (not just margin>0): the OOV n-gram signal is noisy
         // on a small corpus, and a false conversion of correct text is the one
         // thing we must avoid. Misses are fine — double-⇧ fixes them by hand.
-        if margin >= config.ngramMinMargin && confidence >= config.threshold {
+        var speller = margin > 0 && spellerKnows(lc, current)
+        // Four letters on the EN layout are too few for an n-gram to tell Russian
+        // from a code ("xbrl", "lqdt", "dpkg"), and a dot inside is a domain or a file
+        // name ("vk.com", "next.js"): there the speller has to know the Russian word
+        // too. Other tokens keep the benefit of the doubt, which is how names and
+        // typos typed on the wrong layout still convert.
+        if current == .en, core.letterCount <= 4 || core.contains("."), let known = ruWordOracle,
+           !spellerReady() || !known(altLC.filter { $0.isLetter }) { speller = true }
+        if margin >= config.ngramMinMargin && confidence >= config.threshold && !speller {
             return Decision(shouldConvert: true, from: current, to: target,
                             original: token, converted: fullConverted,
                             confidence: confidence, reason: .ngramMargin)
@@ -577,30 +731,71 @@ public final class DetectionEngine: @unchecked Sendable {
         // stem and the typed reading is not, and the n-gram already leans target.
         // Lowers the bar for genuine inflected forms without raising FP (the stem
         // must be real and the typed form must NOT look native in its layout).
-        if margin > 0,
+        if margin > 0, !speller,
            altModel.looksLikeInflection(altLC), !curModel.looksLikeInflection(lc) {
             return Decision(shouldConvert: true, from: current, to: target,
                             original: token, converted: fullConverted,
                             confidence: max(0.7, confidence), reason: .morphology)
         }
-        return .noop(token, layout: current, reason: .belowThreshold)
+        // The score goes with the refusal: it tells a near miss from a plain Russian
+        // word when the history is read later.
+        return Decision(shouldConvert: false, from: current, to: current, original: token,
+                        converted: token, confidence: confidence, reason: .belowThreshold)
     }
 
     // MARK: - helpers
 
-    private let punctuation = CharacterSet.punctuationCharacters
+    /// Short words stay out of it: to the English speller "r", "ye" and "tot" are
+    /// words, and they are also how "к", "ну" and "еще" come out on the EN layout.
+    /// So do tokens with inner punctuation, which it splits and passes in pieces: that
+    /// "k.lb" looks fine to it says nothing about "люди". An apostrophe stays, English
+    /// has words with it. A speller that cannot be asked counts as knowing a cyrillic
+    /// word: a correct word nobody vouched for must not be rewritten on a guess.
+    private func spellerKnows(_ word: String, _ layout: Layout) -> Bool {
+        guard word.count >= (layout == .ru ? 3 : 4), word.allSatisfy({ $0.isLetter || $0 == "'" }),
+              let oracle = layout == .ru ? ruWordOracle : enWordOracle else { return false }
+        guard spellerReady() else { return layout == .ru }
+        return oracle(word)
+    }
+
+    private func isRefused(_ word: String) -> Bool {
+        learnedReverts.contains(word) || exceptions.contains(word)
+    }
+
+    static func hasTripleLetter(_ s: String) -> Bool {
+        var run = 0
+        var previous: Character?
+        for c in s {
+            run = c == previous ? run + 1 : 1
+            previous = c
+            if run >= 3 && c.isLetter { return true }
+        }
+        return false
+    }
+
+    /// What surrounds the core of a token.
+    static let outerCharacters = CharacterSet.punctuationCharacters
         .union(.whitespacesAndNewlines).union(.symbols)
 
     private func sigmoid(_ x: Double) -> Double { 1.0 / (1.0 + exp(-x)) }
 
     /// Letter-mapping punctuation kept word-internal by KeystrokeBuffer. As the
     /// OUTER char of a token it's real sentence punctuation → preserve it.
-    private static let softPunct: Set<Character> = [",", ".", ";", "'", "[", "]", "`"]
+    private static let softPunct: Set<Character> = [",", ".", ";", "'", "[", "]", "`", "\\",
+                                                    ":", "<", ">", "{"]
 
     static func convertPreservingOuterPunct(_ token: String, to target: Layout) -> String {
         var lead = "", trail = "", mid = Substring(token)
-        while let f = mid.first, softPunct.contains(f) { lead.append(f); mid = mid.dropFirst() }
-        while let l = mid.last, softPunct.contains(l) { trail = String(l) + trail; mid = mid.dropLast() }
+        // Brackets on the RU layout come from the key left of 1 (macOS Russian):
+        // that is "`" and "~" on the way to English, not sentence punctuation. On
+        // Russian – PC they cannot be typed, and KeyMap leaves them as they are. A pair
+        // around a word is a pair, whatever the keys: "~broker`" means nothing.
+        let paired = token.first == "[" && token.last == "]"
+        func keep(_ c: Character) -> Bool {
+            softPunct.contains(c) && (paired || !(target == .en && (c == "[" || c == "]")))
+        }
+        while let f = mid.first, keep(f) { lead.append(f); mid = mid.dropFirst() }
+        while let l = mid.last, keep(l) { trail = String(l) + trail; mid = mid.dropLast() }
         // Converting to Russian, a "[" right after the word is the х key, not a
         // bracket: plural genitives end in -х all the time ("lt;ehys[" →
         // "дежурных", not "дежурны["), while a bracket would need an opening one.

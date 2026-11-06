@@ -59,4 +59,22 @@ final class KeystrokeBufferMoreTests: XCTestCase {
         XCTAssertNil(step.completedWord)
         XCTAssertEqual(step.boundary, " ")
     }
+
+    // A capital Ж/Б/Ю/Х typed on the EN layout opens the word; mid-word the same
+    // characters are punctuation, as they look.
+    func testShiftedLetterKeyOpensAWord() {
+        let b = KeystrokeBuffer()
+        _ = feed(b, ":tyobyf")
+        XCTAssertEqual(b.word, ":tyobyf")
+        XCTAssertEqual(b.input(" ").completedWord, ":tyobyf")
+        _ = feed(b, "12")
+        XCTAssertEqual(b.input(":").completedWord, "12", "time and ratios still split")
+    }
+
+    // ё sits on the backslash key of the macOS Russian layout.
+    func testBackslashStaysInTheWord() {
+        let b = KeystrokeBuffer()
+        _ = feed(b, "x\\hn")
+        XCTAssertEqual(b.word, "x\\hn")
+    }
 }

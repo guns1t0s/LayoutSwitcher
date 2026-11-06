@@ -14,9 +14,11 @@ protocol InputCaptureDelegate: AnyObject {
 
 /// CGEventTap front-end (NFR-1 event-driven, REL-1/REL-2/REL-3).
 ///
-/// The C callback does the absolute minimum and ALWAYS returns the event
-/// unmodified (fail-open: we never swallow real keystrokes). Corrections are
-/// applied later by *posting* synthetic events, so the hot path stays <1ms.
+/// The callback runs on the main thread and holds every keystroke of the system
+/// while it does, so it works from memory: no Accessibility calls, no file writes.
+/// It can swallow a keystroke when a word is converted right there; anything else
+/// goes through untouched (fail-open). Word handling is not under 1 ms, see
+/// `CallbackTimings` for what it really takes.
 /// A self-healing watchdog plus the tap-disabled events re-arm the tap if
 /// macOS kills it under load (the classic "switcher silently stopped" bug).
 final class InputCapture {
@@ -42,9 +44,10 @@ final class InputCapture {
     /// the two things that explain a tap that keeps getting disabled.
     private(set) var disabledByTimeout = 0
     private(set) var disabledByUserInput = 0
-    private(set) var slowestKeyMs = 0.0
-    private(set) var slowKeyCallbacks = 0
     private(set) var tapRecreations = 0     // times fully rebuilt (dead port)
+    /// Shared with the coordinator, whose stages it adds up per callback.
+    var timings: CallbackTimings?
+    var frontmostApp: () -> String = { "" }
 
     // double-shift gesture state
     private var prevFlags = CGEventFlags()
@@ -170,6 +173,11 @@ final class InputCapture {
             return Unmanaged.passUnretained(event)
         }
 
+        let timings = me.timings
+        timings?.noteQueueDelay(eventTimestamp: event.timestamp)
+        timings?.begin(path: type == .keyDown ? "letter" : type == .flagsChanged ? "flags" : "mouse")
+        defer { timings?.end(app: me.frontmostApp()) }
+
         switch type {
         case .keyDown:
             me.eventsSeen += 1
@@ -179,12 +187,6 @@ final class InputCapture {
             event.keyboardGetUnicodeString(maxStringLength: 8, actualStringLength: &length, unicodeString: &buf)
             let chars = String(utf16CodeUnits: buf, count: length)
             me.otherKeySinceShift = true
-            let started = DispatchTime.now().uptimeNanoseconds
-            defer {
-                let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
-                if ms > me.slowestKeyMs { me.slowestKeyMs = ms }
-                if ms > 50 { me.slowKeyCallbacks += 1 }
-            }
             // The delegate may convert the just-finished word SYNCHRONOUSLY and
             // swallow this boundary keystroke (re-inserting it itself) — that
             // eliminates the async race where a fast next keystroke cancelled a

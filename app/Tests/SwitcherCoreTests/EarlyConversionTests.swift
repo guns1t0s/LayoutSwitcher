@@ -39,6 +39,56 @@ final class EarlyConversionTests: XCTestCase {
         }
     }
 
+    private func firstFireEN(_ e: DetectionEngine, _ word: String, context: Layout? = nil) -> (Int, String)? {
+        for n in 1...word.count {
+            if let d = e.evaluatePrefixEN(String(word.prefix(n)), context: context) { return (n, d.converted) }
+        }
+        return nil
+    }
+
+    // Russian typed on the EN layout, fixed by hand after a few letters.
+    func testRussianOnTheEnglishLayout() {
+        let e = engine()
+        XCTAssertEqual(e.evaluatePrefixEN("Xth", context: nil)?.converted, "Чер")
+        XCTAssertEqual(e.evaluatePrefixEN("Dkf", context: .ru)?.converted, "Вла")
+        XCTAssertEqual(e.evaluatePrefixEN("ghbd", context: nil)?.converted, "прив")
+        XCTAssertEqual(e.evaluatePrefixEN("ghbd", context: nil)?.reason, .early)
+    }
+
+    func testEnglishStaysEnglish() {
+        let e = engine()
+        for w in ["hello", "world", "server", "release", "the", "pdf", "api", "jit", "owa"] {
+            XCTAssertNil(firstFireEN(e, w), w)
+        }
+    }
+
+    // Abbreviations and identifiers: three lowercase letters, caps, camelCase, digits.
+    func testShapesThatAreNotWords() {
+        let e = engine()
+        XCTAssertNil(e.evaluatePrefixEN("ghb", context: nil), "three lowercase letters look like an abbreviation")
+        XCTAssertNil(e.evaluatePrefixEN("GHB", context: nil))
+        XCTAssertNil(e.evaluatePrefixEN("gHbd", context: nil))
+        XCTAssertNil(e.evaluatePrefixEN("ghb1", context: nil))
+        XCTAssertNil(e.evaluatePrefixEN("ghb_", context: nil))
+    }
+
+    func testEnglishContextHoldsTheRuleBack() {
+        let e = engine()
+        XCTAssertNil(e.evaluatePrefixEN("ghbd", context: .en))
+        XCTAssertNotNil(e.evaluatePrefixEN("ghbd", context: .ru))
+    }
+
+    func testRevertsAndTheSpellerHoldTheRuleBack() {
+        let e = engine()
+        e.learnedReverts = ["ghbdtn"]
+        XCTAssertNil(e.evaluatePrefixEN("ghbd", context: nil))
+        e.learnedReverts = ["привет"]
+        XCTAssertNil(e.evaluatePrefixEN("ghbd", context: nil))
+        e.learnedReverts = []
+        e.enPrefixOracle = { $0 == "ghbd" }
+        XCTAssertNil(e.evaluatePrefixEN("ghbd", context: nil))
+    }
+
     // Ordinary Russian never fires: every prefix of a dictionary word is known.
     func testDictionaryWordsNeverFire() {
         let e = engine()

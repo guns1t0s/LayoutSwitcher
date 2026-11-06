@@ -65,5 +65,7 @@ final class TextToolsTests: XCTestCase {
         XCTAssertNil(TextFixes.wordBeforeCaret(in: "12 34", caret: 5))                  // no letters
         XCTAssertNil(TextFixes.wordBeforeCaret(in: "", caret: 0))
         XCTAssertEqual(TextFixes.wordBeforeCaret(in: "abc", caret: 99), "abc")          // caret clamped
+        XCTAssertEqual(TextFixes.wordBeforeCaret(in: "😀😀 уьм дальше", caret: 8), "уьм", "caret is UTF-16")
+        XCTAssertEqual(TextFixes.wordBeforeCaret(in: "😀 abc", caret: 99), "abc")
     }
 }

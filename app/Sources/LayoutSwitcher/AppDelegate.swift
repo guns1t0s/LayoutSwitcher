@@ -5,14 +5,15 @@ import SwitcherCore
 /// Single-instance, permission onboarding, tap supervision across sleep/wake.
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
-    private let store = Store()
+    private let store = Store(directory: LiveCheck.dataDirectory)
     private let layout = LayoutController()
     private let context = ContextProvider()
     private let input = InputCapture()
-    private let eventLog = EventLog()
+    private let eventLog = EventLog(directory: LiveCheck.dataDirectory)
     private let hotkeys = HotkeyManager()
     private let focus = FocusObserver()
     private let overlay = OverlayController()
+    private let speller = SpellerGate()
 
     private var coordinator: ActionCoordinator!
     private var menuBar: MenuBarController!
@@ -29,24 +30,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // AX readers here all fail open, so a slow app just reads as "unknown".
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.3)
 
+        // The layouts this Mac really has, not the ones the static tables assume.
+        let keys = layout.physicalKeys()
+        if !keys.isEmpty { KeyMap.install(keys) }
+
         let dicts = Dictionaries.loadForApp()   // bundled + local personal lexicon
-        // System Russian spell checker as the prefix oracle for early conversion:
-        // a dictionary far larger than ours, ~2 ms per lookup, and only asked about
-        // the rare letters that already look like English typed on the RU layout.
-        let speller = NSSpellChecker.shared
-        let ruSpell = speller.availableLanguages.contains("ru")
-        if ruSpell { _ = speller.completions(forPartialWordRange: NSRange(location: 0, length: 3), in: "при", language: "ru", inSpellDocumentWithTag: 0) }   // warm up
         coordinator = ActionCoordinator(store: store, dictionaries: dicts,
                                         layout: layout, context: context, eventLog: eventLog)
         coordinator.engine.warmUp()   // prefix sets now, not inside the first key callback
-        if ruSpell {
-            coordinator.engine.ruPrefixOracle = { prefix in
-                let n = (prefix as NSString).length
-                let c = speller.completions(forPartialWordRange: NSRange(location: 0, length: n),
-                                            in: prefix, language: "ru", inSpellDocumentWithTag: 0) ?? []
-                return !c.isEmpty
-            }
+        let timings = coordinator.timings
+        speller.attach(to: coordinator.engine, timings: timings) { [weak coordinator] in
+            coordinator?.mayAskSpeller() == true
         }
+        coordinator.onWordStart = { [speller] in speller.wakeUp() }
+        input.timings = timings
+        input.frontmostApp = { [context] in context.frontmostBundleID ?? "" }
         input.delegate = coordinator
 
         // Restarts used to reset word-learning progress (the manual-fix tally is
@@ -55,10 +53,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // learnAfterManualFixes across restarts.
         if store.settings.logHistory {
             var counts: [String: Int] = [:]
+            var mentionApps: [String: Int] = [:]
             for e in eventLog.all() where e.kind == "doubleShift" && !e.converted.isEmpty {
                 counts[e.converted.lowercased(), default: 0] += 1
+                if e.original.hasPrefix("\""), e.converted.hasPrefix("@") { mentionApps[e.app, default: 0] += 1 }
             }
             store.seedManualFixTally(counts)
+            store.seedMentionApps(mentionApps)
         }
 
         let model = SettingsModel(store: store, coordinator: coordinator)
@@ -99,8 +100,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menuBar.diagnostics = { [weak self] in self?.diagnosticsReport() ?? "" }
 
+        context.onFocusRead = { [weak self] in self?.coordinator.handleFocusRead() }
         focus.onFocusChange = { [weak self] in self?.coordinator.handleFocusChange() }
         focus.start()
+        context.refreshFocus()
 
         // Health drives the menu-bar state; the watchdog re-acquires the tap on
         // its own when permissions return, so no separate retry timer is needed.
@@ -110,10 +113,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Permissions.requestInputMonitoring()   // prompt + register in the IM list
         input.start()
         observeSystemEvents()
-        LoginItem.set(enabled: store.settings.startAtLogin)
+        if LiveCheck.reportPath != nil {
+            // The app itself is the "chat" of the run, one that earned the quote rule.
+            store.seedMentionApps([Bundle.main.bundleIdentifier ?? "": 12])
+            LiveCheck.start(coordinator: coordinator, layout: layout)
+        } else {
+            LoginItem.set(enabled: store.settings.startAtLogin)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        store.flush()
+        eventLog.flushNow()
         input.stop()
         focus.stop()
         hotkeys.unregister()
@@ -144,12 +155,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func diagnosticsReport() -> String {
         let s = store.settings
+        let t = coordinator.timings
+        func ms(_ v: Double) -> String { String(format: "%.0f", v) }
+        func pairs(_ d: [String: Double], _ format: String) -> String {
+            d.sorted { $0.value > $1.value }.map { "\($0.key) \(String(format: format, $0.value))" }
+                .joined(separator: ", ")
+        }
+        let clock = DateFormatter()
+        clock.dateFormat = "HH:mm:ss"
         return """
         Accessibility trusted: \(Permissions.isAccessibilityTrusted)
         Input Monitoring granted: \(Permissions.isInputMonitoringGranted)
         Event tap active: \(input.isActive)  (rearms: \(input.tapRearms), recreations: \(input.tapRecreations))
         Tap disabled by macOS: timeout \(input.disabledByTimeout), user input \(input.disabledByUserInput)
-        Slowest key callback: \(String(format: "%.0f", input.slowestKeyMs)) ms (\(input.slowKeyCallbacks) over 50 ms)
+        Slowest key callback: \(ms(t.slowestMs)) ms (\(t.slowCount) over 50 ms: \(pairs(t.slowByPath.mapValues(Double.init), "%.0f")))
+        Slowest stages, ms: \(pairs(t.slowestStages, "%.1f"))
+        Queue delay: max \(ms(t.maxQueueDelayMs)) ms, \(t.lateEvents) over 50 ms
+        Speller misses: \(t.spellerMisses), field-pending skips: \(t.fieldPendingSkips)
         Key events seen: \(input.eventsSeen)
         Word boundaries seen: \(coordinator.boundariesSeen)
         Conversions applied: \(coordinator.conversionsApplied)
@@ -161,10 +183,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Front app: \(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?")
         Secure input now: \(context.isSecureInput)
         Blacklisted apps: \(s.appBlacklist.count)
-        Dict: ru \(coordinator.engine.learnedWords.count) learned
+        Dict: ru \(coordinator.engine.learnedWords.count) learned, reverts \(coordinator.engine.learnedReverts.count), mention apps \(store.data.mentionApps.filter { $0.value >= Store.mentionAppThreshold }.count)
         Outcomes: \(coordinator.reasonCounts.sorted { $0.value > $1.value }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
         Recent decisions (new→old):
         \(coordinator.recentDecisions.isEmpty ? "  —" : coordinator.recentDecisions.map { "  " + $0 }.joined(separator: "\n"))
+        Slow callbacks (new→old):
+        \(t.ring.isEmpty ? "  —" : t.ring.map { "  \(clock.string(from: $0.at)) \($0.path) \(ms($0.totalMs)) ms \(pairs($0.stages, "%.0f")), rest \(ms($0.restMs)) \($0.app)" }.joined(separator: "\n"))
         """
     }
 
