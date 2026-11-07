@@ -61,7 +61,8 @@ pgrep -f 'LayoutSwitcher --livecheck' >/dev/null && open "$CHECK_APP"
 start=$(date +%s)
 while :; do
     [ -s "$REPORT" ] && break
-    pgrep -f 'LayoutSwitcher --livecheck' >/dev/null || { echo "the run ended without a report"; break; }
+    # The report is written just before the run quits: look again once it is gone.
+    pgrep -f 'LayoutSwitcher --livecheck' >/dev/null || { [ -s "$REPORT" ] || echo "the run ended without a report"; break; }
     [ $(( $(date +%s) - start )) -ge "$LIMIT" ] && { echo "timeout after $LIMIT s"; break; }
     sleep 0.5
 done
