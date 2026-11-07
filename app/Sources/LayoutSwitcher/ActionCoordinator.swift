@@ -452,8 +452,13 @@ final class ActionCoordinator: InputCaptureDelegate {
         if store.settings.doubleShiftConvertWord { fix(interval: interval) }  // convert last word + switch
     }
 
-    /// Live check: start the next scenario from a clean slate.
-    func forgetTyping() { resetWordState() }
+    /// Live check: start the next scenario from a clean slate, the field read again.
+    /// The scenario has set its layout: no remembered one may replace it on that read.
+    func forgetTyping() {
+        resetWordState()
+        proactiveLayoutDue = false
+        context.focusMayHaveMoved()
+    }
 
     func inputDidClick() {
         context.focusMayHaveMoved(afterHeldEvent: true)
@@ -681,7 +686,11 @@ final class ActionCoordinator: InputCaptureDelegate {
         return true
     }
 
-    /// Shared replace used by snippets / autofix (no layout switch).
+    /// Shared replace used by snippets / autofix (no layout switch). After the boundary
+    /// key, not instead of it: the key itself takes an inline suggestion selected after
+    /// the caret, or steps over a bracket the editor closed by itself, which a swallowed
+    /// key typed again inside the text does not. The price is the race of every rewrite
+    /// made later than the callback (see `LayoutController.send`).
     private func applyReplacement(_ original: String, with text: String,
                                   boundary: Character?, layoutAfter: Layout?) {
         let plan = CorrectionPlanner.replace(original: original, with: text, boundary: boundary)

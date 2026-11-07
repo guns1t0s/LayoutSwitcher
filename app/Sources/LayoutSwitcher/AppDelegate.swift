@@ -116,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if LiveCheck.reportPath != nil {
             // The app itself is the "chat" of the run, one that earned the quote rule.
             store.seedMentionApps([Bundle.main.bundleIdentifier ?? "": 12])
-            LiveCheck.start(coordinator: coordinator, layout: layout)
+            LiveCheck.start(coordinator: coordinator, layout: layout, input: input)
         } else {
             LoginItem.set(enabled: store.settings.startAtLogin)
         }

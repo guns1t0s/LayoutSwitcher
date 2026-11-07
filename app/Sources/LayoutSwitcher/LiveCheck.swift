@@ -17,7 +17,9 @@ import SwitcherCore
 /// posts to itself, on a throwaway data directory. It needs the running instance
 /// stopped, an unlocked screen, and `open`: a process started from a shell has that
 /// shell's permissions, not the ones granted to the app. If the window loses the
-/// front the run aborts, so that keys never reach another app.
+/// front the run aborts, so that keys never reach another app, and while it runs
+/// the checked coordinator acts on nothing but this window. A failed scenario comes
+/// with what the tap saw, key by key.
 ///
 ///     open dist/LayoutSwitcher.app --args --livecheck /path/to/report.txt
 ///     open dist/LayoutSwitcher.app      # a moment later: brings its window to the front
@@ -29,6 +31,18 @@ enum LiveCheck {
         return args[i + 1]
     }()
 
+    /// `--only <part of a name>` and `--repeat <rounds>`, for a race that shows up once
+    /// in a while; `--trace` keeps the trace of the scenarios that pass too.
+    static let only: String? = value(after: "--only")
+    static let traceAll = CommandLine.arguments.contains("--trace")
+    static let rounds: Int = value(after: "--repeat").map { Int($0) ?? 0 } ?? 1
+
+    private static func value(after flag: String) -> String? {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+        return args[i + 1]
+    }
+
     /// Everything a run learns stays out of the user's lexicons and history.
     static let dataDirectory: URL? = reportPath == nil ? nil : throwawayDirectory()
 
@@ -36,13 +50,39 @@ enum LiveCheck {
         FileManager.default.temporaryDirectory.appendingPathComponent("layoutswitcher-check-\(getpid())")
     }
 
+    /// What the tap delivered during the run. The tap holds its delegate weakly.
+    private static var tapTrace: TapTrace?
+    private static var termination: DispatchSourceSignal?
+
+    /// The snippet the scenarios type, in the throwaway store of a run.
+    fileprivate static let snippet = (key: "brb", text: "be right back")
+
     /// Start the live run in the app that was just composed.
-    static func start(coordinator: ActionCoordinator, layout: LayoutController) {
-        let driver = RealKeyboard(coordinator: coordinator, layout: layout)
+    static func start(coordinator: ActionCoordinator, layout: LayoutController, input: InputCapture) {
+        let trace = TapTrace(next: coordinator, layout: layout)
+        tapTrace = trace
+        input.delegate = trace
+        coordinator.store.updateData { $0.snippets[snippet.key] = snippet.text }
+        let driver = RealKeyboard(coordinator: coordinator, layout: layout, trace: trace)
         driver.show()
+        // Stopped from outside (a timeout): no Shift left down, the layout and pointer back.
+        signal(SIGTERM, SIG_IGN)
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+        term.setEventHandler {
+            driver.stop("stopped from outside (SIGTERM)")
+            driver.liftShift()
+            DispatchQueue.main.async {
+                driver.restore()
+                if let dir = dataDirectory { try? FileManager.default.removeItem(at: dir) }
+                exit(2)
+            }
+        }
+        term.resume()
+        termination = term
         DispatchQueue.global().async {
-            driver.waitForTheFront()
-            let lines = CheckRunner(driver: driver, coordinator: coordinator, live: true).run().lines
+            let lines = driver.waitForTheFront()
+                ? CheckRunner(driver: driver, coordinator: coordinator, live: true).run().lines
+                : ["ABORT: \(driver.stopReason)", "0 passed, 1 failed"]
             DispatchQueue.main.async {
                 driver.restore()
                 try? (lines.joined(separator: "\n") + "\n")
@@ -65,6 +105,7 @@ enum LiveCheck {
         KeyMap.install(keys)
         let store = Store(directory: dir)
         store.seedMentionApps([SimulatedContext.chat: 12])
+        store.updateData { $0.snippets[snippet.key] = snippet.text }
         let context = SimulatedContext()
         let coordinator = ActionCoordinator(store: store, dictionaries: Dictionaries.loadForApp(directory: dir),
                                             layout: layout, context: context, eventLog: EventLog(directory: dir))
@@ -88,10 +129,16 @@ enum LiveCheck {
 /// main thread themselves: the runner lives on another one and waits between keys.
 private protocol CheckDriver: AnyObject {
     var isReady: Bool { get }
+    /// Why `isReady` went false.
+    var stopReason: String { get }
     var text: String { get }
     var activeLayout: Layout? { get }
+    /// What happened during the current scenario, step by step, for a failure.
+    func takeTrace() -> [String]
     func begin(in layout: Layout)
     func press(_ code: CGKeyCode, shift: Bool, staleEvent: Bool)
+    /// Keys that arrive while the main thread is busy and pile up at the tap.
+    func burst(_ keys: [(code: CGKeyCode, shift: Bool)])
     func doubleShift()
     func click()
     func perform(_ step: CheckStep) -> Bool
@@ -99,8 +146,11 @@ private protocol CheckDriver: AnyObject {
 
 private func onMain<T>(_ body: () -> T) -> T { DispatchQueue.main.sync(execute: body) }
 
+private func quoted(_ s: String) -> String { "\"" + s.replacingOccurrences(of: "\n", with: "\\n") + "\"" }
+
 private enum CheckStep {
     case keys(String)               // physical keys, named by the US layout
+    case burst(String)              // the same, behind a callback that is taking its time
     case doubleShift
     case wait(Int)                  // ms
     case press(CGKeyCode, shift: Bool)
@@ -125,10 +175,21 @@ private struct CheckScenario {
 }
 
 private let returnKey: CGKeyCode = 36, tabKey: CGKeyCode = 48, backspaceKey: CGKeyCode = 51, downKey: CGKeyCode = 125
+private let shiftKey: CGKeyCode = 56
+
+/// The reverts the store had when the current scenario began: rounds of --repeat
+/// share one store, and some scenarios learn a revert on purpose. The same for the
+/// count of each decision.
+private var revertsAtStart = Set<String>()
+private var reasonsAtStart = [String: Int]()
 
 private func noReverts(_ c: ActionCoordinator) -> String? {
-    let left = c.store.revertedWords()
+    let left = c.store.revertedWords().subtracting(revertsAtStart)
     return left.isEmpty ? nil : "learned reverts left: \(left.sorted())"
+}
+
+private func decided(_ reason: String) -> (ActionCoordinator) -> String? {
+    { c in c.reasonCounts[reason, default: 0] > reasonsAtStart[reason, default: 0] ? nil : "no [\(reason)] decision" }
 }
 
 private let scenarios: [CheckScenario] = [
@@ -202,8 +263,25 @@ private let scenarios: [CheckScenario] = [
                   steps: [.fieldIsProtected(true), .keys("ghbdtn "), .fieldIsProtected(false)],
                   text: "ghbdtn ", layout: .en, simulatedOnly: true,
                   extra: { $0.recentDecisions.contains { $0.contains("gh") } ? "the word reached the decisions" : nil }),
+    CheckScenario(name: "a snippet expands at its boundary", start: .en,
+                  steps: [.keys("brb x")], text: "be right back x", layout: .en),
     CheckScenario(name: "password field is left alone", start: .en,
                   steps: [.passwordFieldByTab, .keys("ghbdtn ")], text: "ghbdtn ", layout: .en, liveOnly: true),
+    // A rewrite made in the callback must land ahead of the keys already waiting behind
+    // it. Queued after them it deleted the wrong letters: "gрприв" for "привет".
+    CheckScenario(name: "keys waiting behind a mid-word conversion", start: .en,
+                  steps: [.keys("gh"), .burst("bdtn ")], text: "привет ", layout: .ru, liveOnly: true,
+                  extra: decided("early")),
+    CheckScenario(name: "keys waiting behind a boundary conversion", start: .en,
+                  steps: [.keys("vbh"), .burst(" lheu ")], text: "мир друг ", layout: .ru, liveOnly: true),
+    // The space comes on its own: the window draws keys after our callbacks, and the
+    // layout goes back on the space, which would redraw the login itself.
+    CheckScenario(name: "keys waiting behind a mention", start: .ru,
+                  steps: [.keys("vbh"), .press(returnKey, shift: false), .burst("@ni"), .keys(" ")],
+                  text: "мир\n@ni ", layout: .ru, liveOnly: true),
+    // Three letters: no mid-word rule takes them, only the fix can give "при".
+    CheckScenario(name: "keys waiting behind a double shift", start: .en,
+                  steps: [.keys("gh"), .burst("⇧⇧b")], text: "при", layout: .ru, liveOnly: true),
 ]
 
 private final class CheckRunner {
@@ -219,18 +297,32 @@ private final class CheckRunner {
 
     func run() -> (lines: [String], failed: Int) {
         var lines = [String](), failed = 0, passed = 0
-        for s in scenarios where live ? !s.simulatedOnly : !s.liveOnly {
+        let chosen = scenarios.filter { s in
+            (live ? !s.simulatedOnly : !s.liveOnly)
+                && (LiveCheck.only.map { s.name.localizedCaseInsensitiveContains($0) } ?? true)
+        }
+        guard !chosen.isEmpty, LiveCheck.rounds > 0 else {
+            return (["ABORT: nothing to run (--only \(LiveCheck.only ?? "-"), --repeat \(LiveCheck.rounds))",
+                     "0 passed, 1 failed"], 1)
+        }
+        for s in (0..<LiveCheck.rounds).flatMap({ _ in chosen }) {
             guard driver.isReady else {
-                lines.append("ABORT: the window lost focus before \"\(s.name)\"")
+                lines.append("ABORT before \"\(s.name)\": \(driver.stopReason)")
                 failed += 1
                 break
             }
-            onMain { coordinator.forgetTyping() }
             driver.begin(in: s.start)
+            onMain {
+                coordinator.forgetTyping()
+                revertsAtStart = coordinator.store.revertedWords()
+                reasonsAtStart = coordinator.reasonCounts
+            }
             usleep(300_000)
+            _ = driver.takeTrace()
             var problems = [String]()
             for step in s.steps { perform(step, in: s, into: &lines, problems: &problems) }
             usleep(live ? 400_000 : 150_000)
+            if !driver.isReady { problems.append("the front was lost: \(driver.stopReason)") }
             let (text, now, extra) = onMain { (driver.text, driver.activeLayout, s.extra?(coordinator)) }
             if text != s.text { problems.append("text \(quoted(text)), expected \(quoted(s.text))") }
             if now != s.layout { problems.append("layout \(now?.short ?? "?"), expected \(s.layout.short)") }
@@ -238,9 +330,12 @@ private final class CheckRunner {
             if problems.isEmpty {
                 passed += 1
                 lines.append("ok    \(s.name)")
+                if LiveCheck.traceAll { lines += driver.takeTrace().map { "      " + $0 } }
             } else {
                 failed += 1
                 lines.append("FAIL  \(s.name): \(problems.joined(separator: "; "))")
+                lines += driver.takeTrace().map { "      " + $0 }
+                lines += onMain { coordinator.recentDecisions.prefix(4).map { "      decided: " + $0 } }
             }
         }
         lines.append("\(passed) passed, \(failed) failed")
@@ -259,6 +354,8 @@ private final class CheckRunner {
                 guard let (code, shift) = Self.key(for: c) else { lines.append("no key for \(c)"); continue }
                 driver.press(code, shift: shift, staleEvent: s.staleEvents)
             }
+        case .burst(let text):
+            driver.burst(text.compactMap { Self.key(for: $0) })
         case .press(let code, let shift):
             driver.press(code, shift: shift, staleEvent: s.staleEvents)
         case .doubleShift:
@@ -271,8 +368,6 @@ private final class CheckRunner {
             if !driver.perform(step) { lines.append("step not available in this run") }
         }
     }
-
-    private func quoted(_ s: String) -> String { "\"" + s.replacingOccurrences(of: "\n", with: "\\n") + "\"" }
 
     /// The key that gives `c` on the US layout: scenarios are written the way hands move.
     private static func key(for c: Character) -> (CGKeyCode, shift: Bool)? {
@@ -288,6 +383,7 @@ private final class CheckRunner {
             "_": "-", "+": "=", "{": "[", "}": "]", ":": ";", "\"": "'", "<": ",", ">": ".", "?": "/", "|": "\\",
             "~": "`",
         ]
+        if c == "⇧" { return (shiftKey, false) }     // one tap of Shift, alone
         if let code = plain[c] { return (code, false) }
         if let base = shifted[c], let code = plain[base] { return (code, true) }
         if c.isUppercase, let code = plain[Character(c.lowercased())] { return (code, true) }
@@ -296,6 +392,58 @@ private final class CheckRunner {
 }
 
 // MARK: - live
+
+/// Sits between the tap and the coordinator and writes down what really arrived, so
+/// that a failed live scenario can be read without another run. It also keeps the
+/// checked coordinator to the window of the check: with another app in front a ⇧⇧ of
+/// the run would fix the user's word there, and what the user types there is neither
+/// acted on nor written down. Main thread only.
+private final class TapTrace: InputCaptureDelegate {
+    private let next: ActionCoordinator
+    private let layout: LayoutController
+    private var lines = [String]()
+    private let started = ProcessInfo.processInfo.systemUptime
+
+    init(next: ActionCoordinator, layout: LayoutController) {
+        self.next = next
+        self.layout = layout
+    }
+
+    func note(_ line: String) {
+        lines.append(String(format: "%7.3f ", ProcessInfo.processInfo.systemUptime - started) + line)
+    }
+
+    func take() -> [String] {
+        defer { lines = [] }
+        return lines
+    }
+
+    func inputDidKeyDown(keycode: Int64, chars: String, flags: CGEventFlags) -> Bool {
+        guard NSApp.isActive else {
+            note("a key in another app, left alone")
+            return false
+        }
+        let before = layout.currentLayout()?.short ?? "?"
+        let swallowed = next.inputDidKeyDown(keycode: keycode, chars: chars, flags: flags)
+        note("key \(keycode) chars \(quoted(chars))\(flags.contains(.maskShift) ? " shift" : "") tis:\(before)"
+             + (swallowed ? " swallowed" : ""))
+        return swallowed
+    }
+
+    func inputDidChangeFlags(_ flags: CGEventFlags) { next.inputDidChangeFlags(flags) }
+
+    func inputDidDoubleShift(interval: TimeInterval) {
+        guard NSApp.isActive else { return note("a double shift in another app, left alone") }
+        note(String(format: "double shift, interval %.3f", interval))
+        next.inputDidDoubleShift(interval: interval)
+    }
+
+    func inputDidClick() {
+        guard NSApp.isActive else { return note("a click in another app, left alone") }
+        note("click")
+        next.inputDidClick()
+    }
+}
 
 /// Real key events into a window of the app itself.
 private final class RealKeyboard: CheckDriver {
@@ -310,10 +458,19 @@ private final class RealKeyboard: CheckDriver {
     private var inPasswordField = false
     private var layoutBefore: Layout?
     private var mouseBefore: CGPoint?
+    private let trace: TapTrace
+    private var frontToken: NSObjectProtocol?
+    /// Set once on losing the front: from then on nothing is posted.
+    private var lostTo: String?
+    private var clickedAt: CGPoint?
+    /// Set from any thread when the run must end now (SIGTERM).
+    private let stopLock = NSLock()
+    private var stoppedBecause: String?
 
-    init(coordinator: ActionCoordinator, layout: LayoutController) {
+    init(coordinator: ActionCoordinator, layout: LayoutController, trace: TapTrace) {
         self.coordinator = coordinator
         self.layout = layout
+        self.trace = trace
     }
 
     func show() {
@@ -332,11 +489,16 @@ private final class RealKeyboard: CheckDriver {
         NSApp.activate(ignoringOtherApps: true)
         layoutBefore = layout.currentLayout()
         mouseBefore = CGEvent(source: nil)?.location
+        frontToken = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            self?.trace.note("front app: \(app?.bundleIdentifier ?? app?.localizedName ?? "?")")
+        }
     }
 
     /// macOS may not let a background agent take the front on its own request.
-    func waitForTheFront() {
-        for _ in 0..<50 where !isReady {
+    func waitForTheFront() -> Bool {
+        for _ in 0..<50 where !onMain({ NSApp.isActive }) {
             onMain {
                 NSRunningApplication.current.activate(options: [.activateAllWindows])
                 window.makeKeyAndOrderFront(nil)
@@ -344,16 +506,68 @@ private final class RealKeyboard: CheckDriver {
             usleep(200_000)
         }
         usleep(800_000)
+        guard isReady else {
+            onMain { lostTo = "nobody: the window never got the front, \(lostTo ?? "?") kept it" }
+            return false
+        }
+        return true
     }
 
+    func stop(_ reason: String) {
+        stopLock.lock(); defer { stopLock.unlock() }
+        if stoppedBecause == nil { stoppedBecause = reason }
+    }
+
+    private var stopped: String? {
+        stopLock.lock(); defer { stopLock.unlock() }
+        return stoppedBecause
+    }
+
+    /// Main thread. The pointer goes back only if it is still where our click left it,
+    /// the layout only if the user did not take over: then it is theirs.
     func restore() {
-        if let layoutBefore { layout.select(layoutBefore) }
-        if let mouseBefore { CGWarpMouseCursorPosition(mouseBefore) }
+        liftShift()
+        if lostTo == nil, let layoutBefore { layout.select(layoutBefore) }
+        if let mouseBefore, let clickedAt, let now = CGEvent(source: nil)?.location,
+           abs(now.x - clickedAt.x) < 2, abs(now.y - clickedAt.y) < 2 {
+            CGWarpMouseCursorPosition(mouseBefore)
+        }
     }
 
-    var isReady: Bool { onMain { NSApp.isActive } }
+    /// Any thread.
+    func liftShift() { postShift(down: false) }
+
+    /// The frontmost ordinary window is ours, as the window server sees it: readable
+    /// while the main thread is held, and wrong only about panels above the windows.
+    private static func frontWindowOwner() -> pid_t? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                    kCGNullWindowID) as? [[String: Any]] else { return nil }
+        let front = list.first { ($0[kCGWindowLayer as String] as? Int) == 0 }
+        return (front?[kCGWindowOwnerPID as String] as? Int).map { pid_t($0) }
+    }
+
+    private static func frontWindowIsOurs() -> Bool { (frontWindowOwner() ?? getpid()) == getpid() }
+
+    /// Who has the front: the owner of the front window when that is not us, else the
+    /// active app.
+    private static func frontName() -> String {
+        if let pid = frontWindowOwner(), pid != getpid() {
+            return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "process \(pid)"
+        }
+        return NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "another app"
+    }
+
+    var isReady: Bool {
+        if let why = stopped { onMain { if lostTo == nil { lostTo = why } }; return false }
+        return onMain {
+            if lostTo == nil, !NSApp.isActive || !Self.frontWindowIsOurs() { lostTo = Self.frontName() }
+            return lostTo == nil
+        }
+    }
+    var stopReason: String { "the window lost the front to \(lostTo ?? "?")" }
     var text: String { inPasswordField ? secure.stringValue : textView.string }
     var activeLayout: Layout? { layout.currentLayout() }
+    func takeTrace() -> [String] { onMain { trace.take() } }
 
     func begin(in start: Layout) {
         onMain {
@@ -366,38 +580,101 @@ private final class RealKeyboard: CheckDriver {
         }
     }
 
+    /// Shift goes down as its own event, like a hand: a key event takes its character
+    /// from the state of the keyboard when it is made, flags set on it afterwards
+    /// change nothing there.
     func press(_ code: CGKeyCode, shift: Bool, staleEvent: Bool) {
-        guard let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else { return }
-        down.flags = shift ? .maskShift : []
-        up.flags = down.flags
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
-        usleep(45_000)
+        guard isReady else { return }
+        post(code, shift: shift)
+        onMain { trace.note("screen: \(quoted(text)) tis:\(layout.currentLayout()?.short ?? "?")") }
+    }
+
+    private func post(_ code: CGKeyCode, shift: Bool, gap: UInt32 = 45_000) {
+        guard stopped == nil else { return }
+        if code == shiftKey {
+            tapShift(hold: gap < 45_000 ? 10_000 : 30_000)
+            usleep(gap)
+            return
+        }
+        if shift { postShift(down: true); usleep(15_000) }
+        if let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
+           let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) {
+            down.flags = shift ? .maskShift : []
+            up.flags = down.flags
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+        }
+        if shift { usleep(15_000); postShift(down: false) }
+        usleep(gap)
+    }
+
+    /// The main thread is held the way a slow callback holds it, while the keys go on.
+    /// Nothing here may wait for it, so the front is asked of the window server, and the
+    /// keys follow each other fast: while they wait at the tap, nothing can stop them.
+    func burst(_ keys: [(code: CGKeyCode, shift: Bool)]) {
+        guard isReady else { return }
+        let held = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            held.signal()
+            release.wait()
+        }
+        held.wait()
+        var lost: String?
+        for key in keys {
+            guard stopped == nil, Self.frontWindowIsOurs() else {
+                lost = stopped ?? "\(Self.frontName()), in the middle of a burst"
+                break
+            }
+            post(key.code, shift: key.shift, gap: 3_000)
+        }
+        usleep(20_000)          // the last keys reach the tap too, before it runs again
+        release.signal()
+        if let lost { onMain { if lostTo == nil { lostTo = lost } } }
+        usleep(150_000)
+        guard isReady else { return }
+        onMain { trace.note("after the burst: \(quoted(text)) tis:\(layout.currentLayout()?.short ?? "?")") }
     }
 
     func doubleShift() {
-        tapShift(); usleep(60_000); tapShift(); usleep(150_000)
+        guard isReady else { return }
+        tapShift(hold: 30_000)
+        usleep(60_000)
+        guard isReady else { return }
+        tapShift(hold: 30_000)
+        usleep(150_000)
+        onMain { trace.note("after double shift: \(quoted(text)) tis:\(layout.currentLayout()?.short ?? "?")") }
     }
 
-    private func tapShift() {
-        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 56, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: 56, keyDown: false) else { return }
-        down.type = .flagsChanged
-        down.flags = .maskShift
-        up.type = .flagsChanged
-        up.flags = []
-        down.post(tap: .cghidEventTap)
-        usleep(30_000)
-        up.post(tap: .cghidEventTap)
+    private func tapShift(hold: UInt32) {
+        postShift(down: true)
+        usleep(hold)
+        postShift(down: false)
+    }
+
+    private func postShift(down: Bool) {
+        if down, stopped != nil { return }
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: shiftKey, keyDown: down) else { return }
+        event.type = .flagsChanged
+        event.flags = down ? .maskShift : []
+        event.post(tap: .cghidEventTap)
     }
 
     func click() {
-        let point: CGPoint = onMain {
+        guard isReady else { return }
+        let point: CGPoint? = onMain {
             let frame = window.frame
             let top = NSScreen.screens.first?.frame.maxY ?? frame.maxY
+            // The window under the point must be ours: a floating window of another app
+            // (a call, a video) would take the click.
+            let target = NSPoint(x: frame.midX, y: frame.maxY - 60)
+            guard NSWindow.windowNumber(at: target, belowWindowWithWindowNumber: 0) == window.windowNumber else {
+                lostTo = "a window of another app over the click point"
+                return nil
+            }
             return CGPoint(x: frame.midX, y: top - frame.maxY + 60)
         }
+        guard let point else { return }
+        onMain { clickedAt = point }
         for type in [CGEventType.leftMouseDown, .leftMouseUp] {
             CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point,
                     mouseButton: .left)?.post(tap: .cghidEventTap)
@@ -470,7 +747,9 @@ private final class SimulatedField: CheckDriver {
     }
 
     var isReady: Bool { true }
+    var stopReason: String { "" }
     var activeLayout: Layout? { layout.active }
+    func takeTrace() -> [String] { [] }
 
     func begin(in start: Layout) {
         onMain {
@@ -504,6 +783,10 @@ private final class SimulatedField: CheckDriver {
             }
         }
         usleep(1000)
+    }
+
+    func burst(_ keys: [(code: CGKeyCode, shift: Bool)]) {
+        for key in keys { press(key.code, shift: key.shift, staleEvent: false) }
     }
 
     func doubleShift() {

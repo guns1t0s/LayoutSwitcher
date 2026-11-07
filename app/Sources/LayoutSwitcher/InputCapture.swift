@@ -25,6 +25,11 @@ final class InputCapture {
 
     weak var delegate: InputCaptureDelegate?
 
+    /// While the callback runs: the tap's own place in the event stream, the only
+    /// way to get ahead of the keys waiting behind this one (`LayoutController.send`).
+    /// Main thread only, like the callback.
+    private(set) static var proxy: CGEventTapProxy?
+
     /// Health of the capture, surfaced to the UI (REL-7, scenario 10.6).
     enum Health: Equatable { case active, disabled, noPermission, noTap }
     /// Notified ONLY when health changes.
@@ -158,7 +163,7 @@ final class InputCapture {
 
     // MARK: - C callback (hot path — keep tiny, never block)
 
-    private static let callback: CGEventTapCallBack = { _, type, event, refcon in
+    private static let callback: CGEventTapCallBack = { proxy, type, event, refcon in
         guard let refcon else { return Unmanaged.passUnretained(event) }
         let me = Unmanaged<InputCapture>.fromOpaque(refcon).takeUnretainedValue()
 
@@ -172,6 +177,9 @@ final class InputCapture {
         if event.getIntegerValueField(.eventSourceUserData) == K.syntheticTag {
             return Unmanaged.passUnretained(event)
         }
+
+        InputCapture.proxy = proxy
+        defer { InputCapture.proxy = nil }
 
         let timings = me.timings
         timings?.noteQueueDelay(eventTimestamp: event.timestamp)

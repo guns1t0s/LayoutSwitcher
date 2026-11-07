@@ -75,9 +75,32 @@ class LayoutController {
         down.flags = []; up.flags = []          // never inherit a held modifier
         down.setIntegerValueField(.eventSourceUserData, value: K.syntheticTag)
         up.setIntegerValueField(.eventSourceUserData, value: K.syntheticTag)
-        down.post(tap: .cgSessionEventTap)
-        up.post(tap: .cgSessionEventTap)
+        send(down)
+        send(up)
     }
+
+    /// Into the event stream. Posted the ordinary way, an event comes back through
+    /// our own tap and queues behind every key already waiting there. A rewrite counts
+    /// its Backspaces for the screen as it is now, so landing behind the next letters
+    /// it deleted those instead: with two keys waiting "ghbdtn" came out as "gрприв".
+    /// From inside the callback an event goes in at the tap, ahead of all of them.
+    /// Later, on a timer or from a hotkey, that way is closed; those paths drop out
+    /// when a key has been seen since, and a key still waiting is not seen.
+    private func send(_ event: CGEvent) {
+        if let proxy = InputCapture.proxy {
+            event.flags.insert(Self.posted)
+            event.tapPostEvent(proxy)
+        } else {
+            event.post(tap: .cgSessionEventTap)
+        }
+    }
+
+    /// The flag CGEventPost puts on every event it posts (bit 29, not in the headers;
+    /// SLEventPost sets it on this Mac, SLEventTapPostEvent does not). Without it the
+    /// window server takes our event for the key itself, and an insertion made on key 0
+    /// while the A key is still held can come out as that key's autorepeat, which apps
+    /// throw away. With it the events go out flagged exactly as they did before.
+    private static let posted = CGEventFlags(rawValue: 0x2000_0000)
 
     private func postKey(virtualKey: CGKeyCode, flags: CGEventFlags = []) {
         guard let down = CGEvent(keyboardEventSource: src, virtualKey: virtualKey, keyDown: true),
@@ -87,8 +110,8 @@ class LayoutController {
         down.flags = flags; up.flags = flags
         down.setIntegerValueField(.eventSourceUserData, value: K.syntheticTag)
         up.setIntegerValueField(.eventSourceUserData, value: K.syntheticTag)
-        down.post(tap: .cgSessionEventTap)
-        up.post(tap: .cgSessionEventTap)
+        send(down)
+        send(up)
     }
 
     /// Replace the CURRENTLY SELECTED text with `text` synthetically: one
