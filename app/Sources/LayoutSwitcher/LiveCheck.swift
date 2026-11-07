@@ -136,9 +136,10 @@ private protocol CheckDriver: AnyObject {
     /// What happened during the current scenario, step by step, for a failure.
     func takeTrace() -> [String]
     func begin(in layout: Layout)
-    func press(_ code: CGKeyCode, shift: Bool, staleEvent: Bool)
-    /// Keys that arrive while the main thread is busy and pile up at the tap.
-    func burst(_ keys: [(code: CGKeyCode, shift: Bool)])
+    func press(_ stroke: Stroke, staleEvent: Bool)
+    /// Strokes that arrive while the main thread is busy and pile up at the tap. `then`
+    /// runs on the main thread before it lets them in, the way a hotkey or a timer would.
+    func burst(_ strokes: [Stroke], then action: (() -> Void)?)
     func doubleShift()
     func click()
     func perform(_ step: CheckStep) -> Bool
@@ -148,9 +149,20 @@ private func onMain<T>(_ body: () -> T) -> T { DispatchQueue.main.sync(execute: 
 
 private func quoted(_ s: String) -> String { "\"" + s.replacingOccurrences(of: "\n", with: "\\n") + "\"" }
 
+/// What a hand does, one key at a time.
+private enum Stroke {
+    case key(CGKeyCode, shift: Bool)
+    case command(CGKeyCode)         // ⌘ with a key: a shortcut
+    case shiftTap                  // "⇧" in a scenario: Shift alone, down and up
+    case shiftDown, shiftUp         // "⇑" and "⇓": a Shift held across what comes between
+}
+
 private enum CheckStep {
-    case keys(String)               // physical keys, named by the US layout
-    case burst(String)              // the same, behind a callback that is taking its time
+    case keys(String)               // physical keys, named by the US layout; ⇧ ⇑ ⇓ for Shift
+    /// The same, behind a main thread that is taking its time; `then` acts on the
+    /// coordinator before the keys come in, the way a hotkey or the menu does.
+    case burst(String, then: ((ActionCoordinator) -> Void)? = nil)
+    case selectAll                  // ⌘A
     case doubleShift
     case wait(Int)                  // ms
     case press(CGKeyCode, shift: Bool)
@@ -175,7 +187,7 @@ private struct CheckScenario {
 }
 
 private let returnKey: CGKeyCode = 36, tabKey: CGKeyCode = 48, backspaceKey: CGKeyCode = 51, downKey: CGKeyCode = 125
-private let shiftKey: CGKeyCode = 56
+private let shiftKey: CGKeyCode = 56, commandKey: CGKeyCode = 55
 
 /// The reverts the store had when the current scenario began: rounds of --repeat
 /// share one store, and some scenarios learn a revert on purpose. The same for the
@@ -190,6 +202,16 @@ private func noReverts(_ c: ActionCoordinator) -> String? {
 
 private func decided(_ reason: String) -> (ActionCoordinator) -> String? {
     { c in c.reasonCounts[reason, default: 0] > reasonsAtStart[reason, default: 0] ? nil : "no [\(reason)] decision" }
+}
+
+/// An undo learns its word, which is how it is seen to have run; the lesson goes again
+/// at once, for the scenarios and the rounds after this one.
+private func learnedRevert(_ word: String) -> (ActionCoordinator) -> String? {
+    { c in
+        let learned = c.store.revertedWords().subtracting(revertsAtStart).contains(word)
+        if c.store.forgiveReverts(of: word) { c.syncFromStore() }
+        return learned ? nil : "no revert of \(word) learned"
+    }
 }
 
 private let scenarios: [CheckScenario] = [
@@ -282,6 +304,27 @@ private let scenarios: [CheckScenario] = [
     // Three letters: no mid-word rule takes them, only the fix can give "при".
     CheckScenario(name: "keys waiting behind a double shift", start: .en,
                   steps: [.keys("gh"), .burst("⇧⇧b")], text: "при", layout: .ru, liveOnly: true),
+    // The rewrites made later than the key that asks for them go in at the next callback,
+    // ahead of its event. A double shift with the second Shift still down waits for it to
+    // come up: the fix lands right behind the release, ahead of the key typed after it.
+    CheckScenario(name: "keys waiting behind a double shift held down", start: .en,
+                  steps: [.keys("gh⇧⇑"), .burst("⇓b")], text: "при", layout: .ru, liveOnly: true,
+                  extra: decided("fix-buffer")),
+    CheckScenario(name: "keys waiting behind a double shift on a selection", start: .ru,
+                  steps: [.keys("ghbdtn"), .selectAll, .wait(200), .keys("⇧⇑"), .burst("⇓xy")],
+                  text: "ghbdtnxy", layout: .en, liveOnly: true, extra: decided("fix-selection")),
+    // A hotkey or the menu acts while keys wait at the tap.
+    CheckScenario(name: "keys waiting behind an undo", start: .en,
+                  steps: [.keys("ljv "), .burst("vb", then: { $0.undo() })],
+                  text: "ljv vb", layout: .en, liveOnly: true, extra: learnedRevert("ljv")),
+    CheckScenario(name: "keys waiting behind a text tool", start: .en,
+                  steps: [.keys("abc"), .selectAll, .wait(200), .burst("xy", then: { $0.cycleCaseSelection() })],
+                  text: "ABCxy", layout: .en, liveOnly: true),
+    // The expansion lets its boundary key reach the field first, then goes in ahead of
+    // the keys behind that.
+    CheckScenario(name: "keys waiting behind a snippet", start: .en,
+                  steps: [.keys("brb"), .burst(" the ")], text: "be right back the ", layout: .en,
+                  liveOnly: true),
 ]
 
 private final class CheckRunner {
@@ -351,13 +394,16 @@ private final class CheckRunner {
             if now != expected { problems.append("layout \(now?.short ?? "?") midway, expected \(expected.short)") }
         case .keys(let text):
             for c in text {
-                guard let (code, shift) = Self.key(for: c) else { lines.append("no key for \(c)"); continue }
-                driver.press(code, shift: shift, staleEvent: s.staleEvents)
+                guard let stroke = Self.stroke(for: c) else { lines.append("no key for \(c)"); continue }
+                driver.press(stroke, staleEvent: s.staleEvents)
             }
-        case .burst(let text):
-            driver.burst(text.compactMap { Self.key(for: $0) })
+        case .burst(let text, let action):
+            let coordinator = self.coordinator
+            driver.burst(text.compactMap { Self.stroke(for: $0) }, then: action.map { act in { act(coordinator) } })
+        case .selectAll:
+            driver.press(.command(0), staleEvent: false)
         case .press(let code, let shift):
-            driver.press(code, shift: shift, staleEvent: s.staleEvents)
+            driver.press(.key(code, shift: shift), staleEvent: s.staleEvents)
         case .doubleShift:
             driver.doubleShift()
         case .wait(let ms):
@@ -370,7 +416,7 @@ private final class CheckRunner {
     }
 
     /// The key that gives `c` on the US layout: scenarios are written the way hands move.
-    private static func key(for c: Character) -> (CGKeyCode, shift: Bool)? {
+    private static func stroke(for c: Character) -> Stroke? {
         let plain: [Character: CGKeyCode] = [
             "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9, "b": 11, "q": 12,
             "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23,
@@ -383,10 +429,15 @@ private final class CheckRunner {
             "_": "-", "+": "=", "{": "[", "}": "]", ":": ";", "\"": "'", "<": ",", ">": ".", "?": "/", "|": "\\",
             "~": "`",
         ]
-        if c == "⇧" { return (shiftKey, false) }     // one tap of Shift, alone
-        if let code = plain[c] { return (code, false) }
-        if let base = shifted[c], let code = plain[base] { return (code, true) }
-        if c.isUppercase, let code = plain[Character(c.lowercased())] { return (code, true) }
+        switch c {
+        case "⇧": return .shiftTap
+        case "⇑": return .shiftDown
+        case "⇓": return .shiftUp
+        default: break
+        }
+        if let code = plain[c] { return .key(code, shift: false) }
+        if let base = shifted[c], let code = plain[base] { return .key(code, shift: true) }
+        if c.isUppercase, let code = plain[Character(c.lowercased())] { return .key(code, shift: true) }
         return nil
     }
 }
@@ -421,6 +472,7 @@ private final class TapTrace: InputCaptureDelegate {
     func inputDidKeyDown(keycode: Int64, chars: String, flags: CGEventFlags) -> Bool {
         guard NSApp.isActive else {
             note("a key in another app, left alone")
+            next.forgetTyping()         // and nothing scheduled for the check's window lands there
             return false
         }
         let before = layout.currentLayout()?.short ?? "?"
@@ -439,11 +491,17 @@ private final class TapTrace: InputCaptureDelegate {
     }
 
     func inputDidClick() {
-        guard NSApp.isActive else { return note("a click in another app, left alone") }
+        guard NSApp.isActive else {
+            next.forgetTyping()
+            return note("a click in another app, left alone")
+        }
         note("click")
         next.inputDidClick()
     }
 }
+
+/// Written by the runner before it lets the main thread go, read there after.
+private final class Gate { var open = true }
 
 /// Real key events into a window of the app itself.
 private final class RealKeyboard: CheckDriver {
@@ -485,6 +543,16 @@ private final class RealKeyboard: CheckDriver {
         window.contentView?.addSubview(textView)
         window.contentView?.addSubview(login)
         window.contentView?.addSubview(secure)
+        // ⌘A reaches the text view only through a menu item: the agent app has no menu.
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let bar = NSMenu()
+        for menu in [NSMenu(title: K.appName), edit] {
+            let item = NSMenuItem()
+            item.submenu = menu
+            bar.addItem(item)
+        }
+        NSApp.mainMenu = bar
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         layoutBefore = layout.currentLayout()
@@ -580,54 +648,77 @@ private final class RealKeyboard: CheckDriver {
         }
     }
 
-    /// Shift goes down as its own event, like a hand: a key event takes its character
-    /// from the state of the keyboard when it is made, flags set on it afterwards
-    /// change nothing there.
-    func press(_ code: CGKeyCode, shift: Bool, staleEvent: Bool) {
+    func press(_ stroke: Stroke, staleEvent: Bool) {
         guard isReady else { return }
-        post(code, shift: shift)
+        post(stroke)
         onMain { trace.note("screen: \(quoted(text)) tis:\(layout.currentLayout()?.short ?? "?")") }
     }
 
-    private func post(_ code: CGKeyCode, shift: Bool, gap: UInt32 = 45_000) {
+    private func post(_ stroke: Stroke, gap: UInt32 = 45_000) {
         guard stopped == nil else { return }
-        if code == shiftKey {
-            tapShift(hold: gap < 45_000 ? 10_000 : 30_000)
-            usleep(gap)
-            return
+        switch stroke {
+        case .shiftTap: tapShift(hold: gap < 45_000 ? 10_000 : 30_000)
+        case .shiftDown: postShift(down: true)
+        case .shiftUp: postShift(down: false)
+        case .key(let code, let shift): postKey(code, with: shift ? [shiftKey] : [])
+        case .command(let code): postKey(code, with: [commandKey])
         }
-        if shift { postShift(down: true); usleep(15_000) }
+        usleep(gap)
+    }
+
+    private static let flag: [CGKeyCode: CGEventFlags] = [
+        shiftKey: .maskShift, commandKey: .maskCommand,
+    ]
+
+    /// Each modifier goes down as its own event, like a hand: a key event takes its
+    /// character from the state of the keyboard when it is made, flags set on it
+    /// afterwards change nothing there.
+    private func postKey(_ code: CGKeyCode, with modifiers: [CGKeyCode]) {
+        var flags = CGEventFlags()
+        for m in modifiers {
+            flags.insert(Self.flag[m] ?? [])
+            postModifier(m, down: true, flags: flags)
+            usleep(15_000)
+        }
         if let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
            let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) {
-            down.flags = shift ? .maskShift : []
-            up.flags = down.flags
+            down.flags = flags
+            up.flags = flags
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
         }
-        if shift { usleep(15_000); postShift(down: false) }
-        usleep(gap)
+        for m in modifiers.reversed() {
+            usleep(15_000)
+            flags.remove(Self.flag[m] ?? [])
+            postModifier(m, down: false, flags: flags)
+        }
     }
 
     /// The main thread is held the way a slow callback holds it, while the keys go on.
     /// Nothing here may wait for it, so the front is asked of the window server, and the
     /// keys follow each other fast: while they wait at the tap, nothing can stop them.
-    func burst(_ keys: [(code: CGKeyCode, shift: Bool)]) {
+    func burst(_ strokes: [Stroke], then action: (() -> Void)?) {
         guard isReady else { return }
         let held = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let act = Gate()
         DispatchQueue.main.async {
             held.signal()
             release.wait()
+            // Still holding the main thread: the keys wait at the tap. Not with another app
+            // in front, whose text a rewrite would change.
+            if act.open { action?() }
         }
         held.wait()
         var lost: String?
-        for key in keys {
+        for stroke in strokes {
             guard stopped == nil, Self.frontWindowIsOurs() else {
                 lost = stopped ?? "\(Self.frontName()), in the middle of a burst"
                 break
             }
-            post(key.code, shift: key.shift, gap: 3_000)
+            post(stroke, gap: 3_000)
         }
         usleep(20_000)          // the last keys reach the tap too, before it runs again
+        act.open = lost == nil && stopped == nil && Self.frontWindowIsOurs()
         release.signal()
         if let lost { onMain { if lostTo == nil { lostTo = lost } } }
         usleep(150_000)
@@ -651,11 +742,13 @@ private final class RealKeyboard: CheckDriver {
         postShift(down: false)
     }
 
-    private func postShift(down: Bool) {
+    private func postShift(down: Bool) { postModifier(shiftKey, down: down, flags: down ? .maskShift : []) }
+
+    private func postModifier(_ code: CGKeyCode, down: Bool, flags: CGEventFlags) {
         if down, stopped != nil { return }
-        guard let event = CGEvent(keyboardEventSource: source, virtualKey: shiftKey, keyDown: down) else { return }
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { return }
         event.type = .flagsChanged
-        event.flags = down ? .maskShift : []
+        event.flags = flags
         event.post(tap: .cghidEventTap)
     }
 
@@ -688,9 +781,9 @@ private final class RealKeyboard: CheckDriver {
             window.makeFirstResponder(login)
         }
         usleep(200_000)
-        press(5, shift: false, staleEvent: false)
-        press(4, shift: false, staleEvent: false)
-        press(tabKey, shift: false, staleEvent: false)
+        press(.key(5, shift: false), staleEvent: false)
+        press(.key(4, shift: false), staleEvent: false)
+        press(.key(tabKey, shift: false), staleEvent: false)
         usleep(300_000)
         return true
     }
@@ -767,7 +860,8 @@ private final class SimulatedField: CheckDriver {
         return String(layout == .ru ? (shift ? k.ruShift : k.ru) : (shift ? k.enShift : k.en))
     }
 
-    func press(_ code: CGKeyCode, shift: Bool, staleEvent: Bool) {
+    func press(_ stroke: Stroke, staleEvent: Bool) {
+        guard case .key(let code, let shift) = stroke else { return }    // Shift alone, ⌘: live runs only
         onMain {
             let eventLayout = staleEvent ? layout.active.other : layout.active
             let swallowed = coordinator.inputDidKeyDown(keycode: Int64(code),
@@ -785,8 +879,9 @@ private final class SimulatedField: CheckDriver {
         usleep(1000)
     }
 
-    func burst(_ keys: [(code: CGKeyCode, shift: Bool)]) {
-        for key in keys { press(key.code, shift: key.shift, staleEvent: false) }
+    func burst(_ strokes: [Stroke], then action: (() -> Void)?) {
+        for stroke in strokes { press(stroke, staleEvent: false) }
+        if let action { onMain(action) }
     }
 
     func doubleShift() {

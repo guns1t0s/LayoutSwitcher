@@ -79,13 +79,28 @@ class LayoutController {
         send(up)
     }
 
+    // MARK: - when a rewrite runs
+
+    /// Run a rewrite where its events go in ahead of every key not seen yet: in the tap
+    /// callback, this one when we are in it, else the next (`InputCapture.later`). With
+    /// no callback to come, right away: then no key waits at the tap either.
+    func inCallback(_ body: @escaping () -> Void) {
+        if InputCapture.proxy != nil || !InputCapture.later(body) { body() }
+    }
+
+    /// Run a rewrite once the event of this callback has gone on to the app, ahead of the
+    /// next one. A snippet needs its boundary key in the field first.
+    func afterThisEvent(_ body: @escaping () -> Void) {
+        if !InputCapture.later(body) { DispatchQueue.main.async(execute: body) }
+    }
+
     /// Into the event stream. Posted the ordinary way, an event comes back through
     /// our own tap and queues behind every key already waiting there. A rewrite counts
     /// its Backspaces for the screen as it is now, so landing behind the next letters
     /// it deleted those instead: with two keys waiting "ghbdtn" came out as "gрприв".
-    /// From inside the callback an event goes in at the tap, ahead of all of them.
-    /// Later, on a timer or from a hotkey, that way is closed; those paths drop out
-    /// when a key has been seen since, and a key still waiting is not seen.
+    /// From inside the callback an event goes in at the tap, ahead of all of them, and
+    /// every rewrite runs there (`inCallback`). The ordinary way is left for a run with
+    /// no tap, where nothing waits.
     private func send(_ event: CGEvent) {
         if let proxy = InputCapture.proxy {
             event.flags.insert(Self.posted)

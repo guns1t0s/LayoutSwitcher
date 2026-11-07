@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import CoreGraphics
 
 protocol InputCaptureDelegate: AnyObject {
@@ -29,6 +30,20 @@ final class InputCapture {
     /// way to get ahead of the keys waiting behind this one (`LayoutController.send`).
     /// Main thread only, like the callback.
     private(set) static var proxy: CGEventTapProxy?
+
+    /// Rewrites decided outside the callback, waiting for the next one (`later`), and
+    /// how many of them ran there or were dropped. Main thread only.
+    private static var pending: [(at: TimeInterval, body: () -> Void)] = []
+    private(set) static var laterRun = 0
+    private(set) static var laterDropped = 0
+    private static let markerSource = CGEventSource(stateID: .privateState)
+    /// The tap, for `later`: whether a callback is going to come at all.
+    private static var activeTap: CFMachPort?
+
+    /// ⇧⌃⌥⌘ as the apps have them, from the last modifier change the tap passed on: set
+    /// before the callback reports it. A posted modifier (another tool's, a live check's)
+    /// reaches the apps, but never the hardware state that `CGEventSource.flagsState` reads.
+    private(set) static var modifiers = CGEventFlags()
 
     /// Health of the capture, surfaced to the UI (REL-7, scenario 10.6).
     enum Health: Equatable { case active, disabled, noPermission, noTap }
@@ -69,8 +84,11 @@ final class InputCapture {
 
     private func createTap() -> Bool {
         if let tap, CGEvent.tapIsEnabled(tap: tap) { return true }
+        // Key-ups only for `later`: its marker is one, and a rewrite waiting for a
+        // callback takes the first that comes.
         let mask: CGEventMask =
             (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.keyUp.rawValue) |
             (1 << CGEventType.flagsChanged.rawValue) |
             (1 << CGEventType.leftMouseDown.rawValue) |
             (1 << CGEventType.rightMouseDown.rawValue)
@@ -82,6 +100,7 @@ final class InputCapture {
             return false   // no Input Monitoring / Accessibility permission yet
         }
         self.tap = tap
+        InputCapture.activeTap = tap
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         self.runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
@@ -94,6 +113,8 @@ final class InputCapture {
         if let runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes) }
         runLoopSource = nil
         tap = nil
+        InputCapture.activeTap = nil
+        InputCapture.dropLater()
     }
 
     /// Dead port (revoked + regranted, or killed under load): rebuild from scratch.
@@ -143,6 +164,7 @@ final class InputCapture {
             if CGEvent.tapIsEnabled(tap: tap) {
                 self.setHealth(.active)
             } else {
+                InputCapture.dropLater()            // keys went by the tap unseen
                 CGEvent.tapEnable(tap: tap, enable: true)
                 self.tapRearms += 1
                 if CGEvent.tapIsEnabled(tap: tap) {
@@ -170,11 +192,13 @@ final class InputCapture {
         // macOS disabled the tap (timeout / heavy load) → turn it back on now.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if type == .tapDisabledByTimeout { me.disabledByTimeout += 1 } else { me.disabledByUserInput += 1 }
+            InputCapture.dropLater()            // keys went by unseen: a waiting rewrite would miss them
             if let tap = me.tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return nil
         }
+        let tag = event.getIntegerValueField(.eventSourceUserData)
         // Skip events we posted ourselves (would otherwise re-enter the pipeline).
-        if event.getIntegerValueField(.eventSourceUserData) == K.syntheticTag {
+        if tag == K.syntheticTag {
             return Unmanaged.passUnretained(event)
         }
 
@@ -182,9 +206,25 @@ final class InputCapture {
         defer { InputCapture.proxy = nil }
 
         let timings = me.timings
+        // The marker of `later` and the key-ups are here for a rewrite that waits.
+        if tag == K.markerTag || type == .keyUp {
+            if !InputCapture.pending.isEmpty {
+                timings?.begin(path: "later")
+                InputCapture.runLater()
+                timings?.end(app: me.frontmostApp())
+            }
+            return tag == K.markerTag ? nil : Unmanaged.passUnretained(event)
+        }
         timings?.noteQueueDelay(eventTimestamp: event.timestamp)
         timings?.begin(path: type == .keyDown ? "letter" : type == .flagsChanged ? "flags" : "mouse")
         defer { timings?.end(app: me.frontmostApp()) }
+
+        // A rewrite waiting for a callback goes in ahead of this event, and of the keys
+        // behind it. Not ahead of a modifier coming up: the Shift of ⇧⇧ reaches the app
+        // before the Backspaces do, and the marker or the next key is behind it.
+        if !InputCapture.pending.isEmpty, type != .flagsChanged || !me.releasesModifier(event.flags) {
+            if let timings { timings.measure("later") { InputCapture.runLater() } } else { InputCapture.runLater() }
+        }
 
         switch type {
         case .keyDown:
@@ -215,7 +255,61 @@ final class InputCapture {
         return Unmanaged.passUnretained(event)   // always pass through (fail-open)
     }
 
+    /// Does this change of the modifiers let one of ⇧⌃⌥⌘ go?
+    private func releasesModifier(_ flags: CGEventFlags) -> Bool {
+        let modifiers: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]
+        return !prevFlags.intersection(modifiers).subtracting(flags).isEmpty
+    }
+
+    // MARK: - rewrites from outside the callback
+
+    /// Run `body` in the next callback, ahead of the event that brings it there: a key, a
+    /// click, a modifier going down, or the marker posted here. An event posted outside the
+    /// callback queues behind every key already waiting at the tap, and a rewrite counts its
+    /// Backspaces for the screen as it is now: behind those keys it deleted them instead
+    /// ("gпр" for "при"). Posted from the callback through the tap, it goes in ahead of
+    /// them, and none of them has reached the app or the coordinator yet.
+    /// False when no callback will come for it: no tap, or secure input keeps the keys
+    /// away from it. No key waits at the tap then either, and the caller posts as before.
+    static func later(_ body: @escaping () -> Void) -> Bool {
+        // In a callback the tap is on; outside one, asking the window server is fine.
+        if proxy == nil {
+            guard let tap = activeTap, CGEvent.tapIsEnabled(tap: tap) else { return false }
+        }
+        guard !IsSecureEventInputEnabled() else { return false }
+        pending.append((ProcessInfo.processInfo.systemUptime, body))
+        // A key going up that no keyboard has. Posted the ordinary way it queues behind the
+        // keys already waiting, and the callback drops it. The window server lets it reach
+        // the tap: its check for key-ups of keys that are not down (SkyLight,
+        // _CGXAdjustForRedundantState) runs after the session taps and passes posted events.
+        // Past a tap that is off, an app gets the release of a key it never saw go down,
+        // with the modifiers as they are, and ignores it.
+        if let marker = CGEvent(keyboardEventSource: markerSource, virtualKey: K.markerKey, keyDown: false) {
+            marker.flags = CGEventSource.flagsState(.combinedSessionState)
+            marker.setIntegerValueField(.eventSourceUserData, value: K.markerTag)
+            marker.post(tap: .cgSessionEventTap)
+        }
+        return true
+    }
+
+    /// In the callback. One that waited too long is dropped: the tap may have been off.
+    private static func runLater() {
+        let due = pending
+        pending.removeAll()
+        let now = ProcessInfo.processInfo.systemUptime
+        for (at, body) in due {
+            if now - at < K.laterDeadline { laterRun += 1; body() } else { laterDropped += 1 }
+        }
+    }
+
+    /// Keys may have gone by the tap unseen: what a waiting rewrite would delete is unknown.
+    private static func dropLater() {
+        laterDropped += pending.count
+        pending.removeAll()
+    }
+
     private func handleFlags(_ flags: CGEventFlags) {
+        Self.modifiers = flags.intersection([.maskShift, .maskControl, .maskAlternate, .maskCommand])
         let shiftNow = flags.contains(.maskShift)
         let shiftBefore = prevFlags.contains(.maskShift)
         if shiftNow && !shiftBefore {                 // Shift pressed down

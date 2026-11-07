@@ -5,6 +5,15 @@ enum K {
     /// them (otherwise backspaces/inserts would re-enter the pipeline).
     static let syntheticTag: Int64 = 0x4C53_5754   // "LSWT"
 
+    /// The marker that brings a rewrite decided outside the tap callback into the next
+    /// one (`InputCapture.later`): its tag, and its key, which no keyboard has.
+    static let markerTag: Int64 = 0x4C53_574D      // "LSWM"
+    static let markerKey: UInt16 = 0x70
+
+    /// A rewrite still waiting for a callback after this long is dropped: the tap was
+    /// off or the main thread busy so long that keys may have gone by unseen.
+    static let laterDeadline: TimeInterval = 0.5
+
     /// Double-tap window for the ⇧⇧ manual-fix gesture.
     static let doubleShiftWindow: TimeInterval = 0.30
 

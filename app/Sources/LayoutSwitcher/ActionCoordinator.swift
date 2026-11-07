@@ -174,22 +174,53 @@ final class ActionCoordinator: InputCaptureDelegate {
                                     capsLock: flags.contains(.maskAlphaShift), to: now)
     }
 
-    /// Run `body` once the gesture modifiers (⇧/⌃/⌥/⌘) have PHYSICALLY released,
-    /// polling the live hardware flag state. Synthetic Backspaces posted while a
-    /// modifier is still down are seen as e.g. Shift+Backspace by apps that read
-    /// the global modifier state (Spotlight) and get dropped — leaving a stray
-    /// leading letter ("кфн" + ⇧⇧ → "кray"). Fires anyway after a bounded wait so
-    /// a stuck modifier can't hang the correction.
-    private func afterModifiersRelease(attempt: Int = 0, _ body: @escaping () -> Void) {
-        let held = CGEventSource.flagsState(.combinedSessionState)
-            .intersection([.maskShift, .maskControl, .maskAlternate, .maskCommand])
-        if !held.isEmpty && attempt < 12 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
-                self?.afterModifiersRelease(attempt: attempt + 1, body)
+    private static let gestureModifiers: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand]
+
+    /// ⇧⌃⌥⌘ down on the keyboard, or down for the apps as the tap last passed them on.
+    /// Not the session state: a release gets there only once it has passed every tap, and
+    /// a rewrite running in our callback right behind it would still read the key down.
+    private static func heldModifiers() -> CGEventFlags {
+        CGEventSource.flagsState(.hidSystemState).union(InputCapture.modifiers).intersection(gestureModifiers)
+    }
+
+    /// Rewrites waiting for the modifiers of their gesture to come up, and the number of
+    /// the poll that watches the keyboard for them.
+    private var awaitingRelease: [() -> Void] = []
+    private var releasePoll = 0
+
+    /// Run `body` once the gesture modifiers (⇧/⌃/⌥/⌘) are up. Synthetic Backspaces
+    /// posted while a modifier is still down are seen as e.g. Shift+Backspace by apps
+    /// that read the global modifier state (Spotlight) and get dropped — leaving a
+    /// stray leading letter ("кфн" + ⇧⇧ → "кray"). The body runs in the tap callback
+    /// (`LayoutController.inCallback`): right behind the event that brings the modifiers
+    /// up (`inputDidChangeFlags`), ahead of the key typed next, which therefore no longer
+    /// cancels the fix. The poll covers a release the tap has not passed on yet, and fires
+    /// anyway after a bounded wait so a stuck modifier, or a release the tap never saw,
+    /// can't hang the correction.
+    private func afterModifiersRelease(_ body: @escaping () -> Void) {
+        if awaitingRelease.isEmpty, Self.heldModifiers().isEmpty { return layout.inCallback(body) }
+        awaitingRelease.append(body)
+        if awaitingRelease.count == 1 { pollRelease(releasePoll, attempt: 0) }
+    }
+
+    private func pollRelease(_ poll: Int, attempt: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            guard let self, poll == self.releasePoll, !self.awaitingRelease.isEmpty else { return }
+            if !Self.heldModifiers().isEmpty && attempt < 11 {
+                self.pollRelease(poll, attempt: attempt + 1)
+            } else {
+                self.releaseAwaiting(behindThisEvent: false)
             }
-        } else {
-            body()
         }
+    }
+
+    /// The modifiers are up: what waited for them goes to the tap callback, the next one
+    /// when the release is the event of the current callback.
+    private func releaseAwaiting(behindThisEvent: Bool) {
+        let bodies = awaitingRelease
+        awaitingRelease.removeAll()
+        releasePoll &+= 1
+        for body in bodies { behindThisEvent ? layout.afterThisEvent(body) : layout.inCallback(body) }
     }
 
     /// Append one switching action to the opt-in history (no-op when disabled).
@@ -446,6 +477,11 @@ final class ActionCoordinator: InputCaptureDelegate {
     func inputDidChangeFlags(_ flags: CGEventFlags) {
         let mask = store.settings.holdToSuppressModifier
         suppressActive = mask != 0 && (flags.rawValue & UInt64(mask)) == UInt64(mask)
+        // The modifiers of a gesture come up as the app will see it: what waited for that
+        // goes in right behind this event.
+        if !awaitingRelease.isEmpty, flags.intersection(Self.gestureModifiers).isEmpty {
+            releaseAwaiting(behindThisEvent: true)
+        }
     }
 
     func inputDidDoubleShift(interval: TimeInterval) {
@@ -689,14 +725,15 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// Shared replace used by snippets / autofix (no layout switch). After the boundary
     /// key, not instead of it: the key itself takes an inline suggestion selected after
     /// the caret, or steps over a bracket the editor closed by itself, which a swallowed
-    /// key typed again inside the text does not. The price is the race of every rewrite
-    /// made later than the callback (see `LayoutController.send`).
+    /// key typed again inside the text does not. So the rewrite waits for the next
+    /// callback and goes in ahead of its event: a key typed fast behind the boundary
+    /// lands after the expansion, not under its Backspaces.
     private func applyReplacement(_ original: String, with text: String,
                                   boundary: Character?, layoutAfter: Layout?) {
         let plan = CorrectionPlanner.replace(original: original, with: text, boundary: boundary)
         let snapshot = keystrokeEpoch
         let before = layout.currentLayout() ?? .en
-        DispatchQueue.main.async { [weak self] in
+        layout.afterThisEvent { [weak self] in
             guard let self, self.keystrokeEpoch == snapshot else { return }
             self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
             if let l = layoutAfter { self.layout.select(l) }
@@ -800,7 +837,7 @@ final class ActionCoordinator: InputCaptureDelegate {
         let epoch = keystrokeEpoch, disruption = disruptionEpoch
         afterModifiersRelease { [weak self] in
             guard let self, self.keystrokeEpoch == epoch, self.disruptionEpoch == disruption,
-                  !CGEventSource.flagsState(.combinedSessionState).contains(.maskShift) else { return }
+                  !Self.heldModifiers().contains(.maskShift) else { return }
             self.toggleLayout()
         }
     }
@@ -864,7 +901,20 @@ final class ActionCoordinator: InputCaptureDelegate {
             self.lastBlock = LastBlock(original: sel, converted: converted)
             self.switchLayout(to)
             self.lastContextLayout = to
-            self.onConversionApplied?(to, nil)
+            self.announce(to)
+        }
+    }
+
+    /// The sound, the overlay and the menu bar after a rewrite, once the callback it ran
+    /// in is over: the overlay asks the app where its caret is, and the callback holds the
+    /// typing of the whole system while it runs.
+    private func announce(_ to: Layout?, _ converted: String? = nil, sound: Bool = false,
+                          learned: String? = nil) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if sound { self.feedback() }
+            if let to { self.onConversionApplied?(to, converted) }
+            if let learned { self.onWordLearned?(learned) }
             self.onChange?()
         }
     }
@@ -890,8 +940,10 @@ final class ActionCoordinator: InputCaptureDelegate {
         // gesture and this running, the on-screen word grew but deleteCount is
         // stale → deleting too few left a leading character ("gпривет"). Any new
         // keystroke bumps keystrokeEpoch → abort cleanly (no state mutated), and a
-        // click moves the caret under the same plan. All state changes, the lexicons
-        // included, live inside the guard so an abort leaves nothing half-done.
+        // click moves the caret under the same plan. A key typed once the modifiers are
+        // up comes after the rewrite (`afterModifiersRelease`), and does not abort it.
+        // All state changes, the lexicons included, live inside the guard so an abort
+        // leaves nothing half-done.
         let epoch = keystrokeEpoch, disruption = disruptionEpoch
         // Wait for the gesture's Shift to physically release before deleting —
         // otherwise the first synthetic Backspace lands as Shift+Backspace in apps
@@ -914,8 +966,6 @@ final class ActionCoordinator: InputCaptureDelegate {
             }
             if inProgress, mention { self.mentionReturn = from }   // "\"" + ⇧⇧ = "@"
             if to == .en, !mention || inProgress { self.afterForeign = converted }
-            self.feedback()
-            self.onConversionApplied?(to, converted)
             if inProgress {
                 // The word is still being typed: keep the CONVERTED prefix in the
                 // buffer, so the letters that follow extend it ("приве"+"т") and the
@@ -948,12 +998,13 @@ final class ActionCoordinator: InputCaptureDelegate {
             // (that poisoned the lexicon and blocked real conversions). A fix of a
             // word still being typed is a FRAGMENT by definition ("тер", "изнес",
             // "алер" all got learned that way) — never learn from those either.
+            var learned: String?
             if !inProgress, !converted.contains(" "), self.engine.isLearnable(converted),
                self.store.recordManualFix(converted) {
                 self.engine.learnedWords = self.store.data.learnedWords
-                self.onWordLearned?(converted)
+                learned = converted
             }
-            self.onChange?()
+            self.announce(to, converted, sound: true, learned: learned)
         }
     }
 
@@ -961,11 +1012,10 @@ final class ActionCoordinator: InputCaptureDelegate {
     /// any text; single ⇧ for capitals is untouched (handled in InputCapture).
     func toggleLayout() {
         buffer.reset()
-        guard let cur = layout.currentLayout() else { layout.toggle(); onChange?(); return }
+        guard let cur = layout.currentLayout() else { layout.toggle(); announce(nil); return }
         let to = cur.other
         switchLayout(to)
-        onConversionApplied?(to, nil)
-        onChange?()
+        announce(to)
     }
 
     /// FR-12 line granularity / scenario 4.4: convert the whole line at the caret.
@@ -1010,21 +1060,26 @@ final class ActionCoordinator: InputCaptureDelegate {
         // that follows it now: the plan deletes by their length.
         guard let lc = lastConversion, let last = lastCompleted, buffer.isEmpty,
               last.text == lc.converted else { return }
-        // An undo retroactively flags the prior conversion as a false positive —
-        // the single most valuable signal for tuning the engine.
-        log("undo", original: lc.converted, converted: lc.original,
-            from: lc.layoutBefore.other, to: lc.layoutBefore, reason: "user-revert")
         let plan = CorrectionPlanner.replace(original: lc.converted, with: lc.original, boundary: last.boundary)
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+        // Like a fix: once the hotkey's ⌃⌥ are up, and only if nothing was typed or
+        // clicked in between. All of it, the lexicon too, inside the guard; a second
+        // press while the first waits finds the conversion undone already.
+        let epoch = keystrokeEpoch, disruption = disruptionEpoch
+        afterModifiersRelease { [weak self] in
+            guard let self, self.keystrokeEpoch == epoch, self.disruptionEpoch == disruption,
+                  self.lastConversion != nil else { return }
+            // An undo retroactively flags the prior conversion as a false positive —
+            // the single most valuable signal for tuning the engine.
+            self.log("undo", original: lc.converted, converted: lc.original,
+                     from: lc.layoutBefore.other, to: lc.layoutBefore, reason: "user-revert")
             self.layout.replace(deleteCount: plan.deleteCount, with: plan.insertText)
-            self.layout.select(lc.layoutBefore)
+            self.switchLayout(lc.layoutBefore)
+            self.store.recordRevert(lc.original)            // stop auto-converting this word
+            self.engine.learnedReverts = self.store.revertedWords()
+            self.lastCompleted = LastWord(text: lc.original, boundary: last.boundary)
+            self.lastConversion = nil
+            self.announce(nil)
         }
-        store.recordRevert(lc.original)            // stop auto-converting this word
-        engine.learnedReverts = store.revertedWords()
-        lastCompleted = LastWord(text: lc.original, boundary: last.boundary)
-        lastConversion = nil
-        onChange?()
     }
 
     // MARK: - shadow review actions (FR-21)
@@ -1048,15 +1103,18 @@ final class ActionCoordinator: InputCaptureDelegate {
     func cycleCaseSelection() { convertSelectionTool { CaseConverter.cycle($0) } }
     func fixCapsSelection() { convertSelectionTool { TextFixes.fixCapsLock(TextFixes.fixDoubleCapital($0)) } }
 
-    /// Apply a transform to the current selection via a direct Accessibility
-    /// write — never the clipboard (that pasted the user's real clipboard in
-    /// Electron). If AX can't read the selection, no-op (a miss, not corruption).
+    /// Apply a transform to the current selection, read over Accessibility and
+    /// replaced synthetically — never the clipboard (that pasted the user's real
+    /// clipboard in Electron). If AX can't read the selection, no-op (a miss, not
+    /// corruption). A key or a click since the read may have replaced the selection.
     private func convertSelectionTool(_ transform: @escaping (String) -> String) {
         guard !mutationBlocked() else { return }
         guard let sel = AXText.selectedText(), !sel.isEmpty else { return }
         let result = transform(sel)
+        let epoch = keystrokeEpoch, disruption = disruptionEpoch
         afterModifiersRelease { [weak self] in
-            self?.layout.replaceSelection(with: result)
+            guard let self, self.keystrokeEpoch == epoch, self.disruptionEpoch == disruption else { return }
+            self.layout.replaceSelection(with: result)
         }
     }
 

@@ -21,7 +21,7 @@ final class CallbackTimings {
     static let slowThresholdMs = 50.0
     private static let ringSize = 20
 
-    /// letter | boundary | early | comma6 | flags | mouse.
+    /// letter | boundary | early | comma6 | flags | mouse | later (a rewrite from outside the callback).
     var path = "letter"
     private var stages: [String: Double] = [:]
     private var startedAt: UInt64 = 0

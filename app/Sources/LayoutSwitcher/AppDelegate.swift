@@ -168,6 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Input Monitoring granted: \(Permissions.isInputMonitoringGranted)
         Event tap active: \(input.isActive)  (rearms: \(input.tapRearms), recreations: \(input.tapRecreations))
         Tap disabled by macOS: timeout \(input.disabledByTimeout), user input \(input.disabledByUserInput)
+        Deferred rewrites: \(InputCapture.laterRun) run in a callback, \(InputCapture.laterDropped) dropped
         Slowest key callback: \(ms(t.slowestMs)) ms (\(t.slowCount) over 50 ms: \(pairs(t.slowByPath.mapValues(Double.init), "%.0f")))
         Slowest stages, ms: \(pairs(t.slowestStages, "%.1f"))
         Queue delay: max \(ms(t.maxQueueDelayMs)) ms, \(t.lateEvents) over 50 ms
