@@ -57,6 +57,13 @@ open dist/LayoutSwitcher.app --args --livecheck /tmp/livecheck.txt
 open dist/LayoutSwitcher.app    # a moment later: brings its window to the front
 ```
 
+`bash scripts/live_check.sh` does the same and starts the app again afterwards; its exit
+code is the verdict. The report shows, for a failed scenario, what the tap saw key by
+key. `--only <part of a name>`, `--repeat <rounds>` and `--trace` after the report path
+narrow a run down to one race.
+Only the live run has real timing: the scenarios named "keys waiting behind..." hold the
+main thread while keys pile up at the tap, which no model of a text field can show.
+
 On first launch grant **two** permissions, then quit & relaunch:
 
 1. **Accessibility** (read focused field) — the app prompts.
